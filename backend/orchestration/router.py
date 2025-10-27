@@ -2,21 +2,39 @@
 
 from __future__ import annotations
 
+import logging
 import textwrap
 from typing import Dict, List
 
 from backend.core.config import settings
 from backend.core.exceptions import KnowledgeNotFoundError
-from backend.knowledge.retrieval.graph_rag import RetrievalSummary, create_graph_rag_engine
+from backend.knowledge.retrieval.graph_rag import GraphRAGEngine, RetrievalSummary, create_graph_rag_engine
+from backend.knowledge.retrieval.offline import create_offline_engine
 from backend.orchestration.context import context_manager
 from backend.orchestration.publisher import event_publisher
+
+logger = logging.getLogger(__name__)
 
 
 class OrchestrationRouter:
     """Coordinates between Slack inputs, workflows, and knowledge systems."""
 
     def __init__(self) -> None:
-        self.rag_engine = create_graph_rag_engine()
+        self.rag_engine = self._build_engine()
+
+    def _build_engine(self) -> GraphRAGEngine:
+        """Select a retrieval engine that can run in the current environment."""
+
+        offline_requested = not settings.OPENAI_API_KEY or not settings.ENABLE_ADVANCED_GRAPH_RAG
+        if offline_requested:
+            logger.info("Initializing offline Graph-RAG engine for Slack orchestration.")
+            return create_offline_engine()
+
+        try:
+            return create_graph_rag_engine()
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.warning("Falling back to offline Graph-RAG engine due to initialization error: %s", exc)
+            return create_offline_engine()
 
     async def route(self, session_id: str, user_id: str, text: str) -> Dict[str, object]:
         """Process a conversational request and return the generated response."""

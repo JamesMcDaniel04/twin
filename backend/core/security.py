@@ -12,12 +12,19 @@ from backend.core.exceptions import UnauthorizedError
 from backend.utils.audit import audit_log
 
 
-def create_access_token(subject: str, expires_delta: timedelta | None = None) -> str:
+def create_access_token(
+    subject: str,
+    expires_delta: timedelta | None = None,
+    claims: Optional[Dict[str, Any]] = None,
+) -> str:
     expire = datetime.utcnow() + (expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
-    payload = {
+    payload: Dict[str, Any] = {
         "sub": subject,
         "exp": expire,
+        "iat": datetime.utcnow(),
     }
+    if claims:
+        payload.update(claims)
     return jwt.encode(payload, settings.SECRET_KEY, algorithm="HS256")
 
 

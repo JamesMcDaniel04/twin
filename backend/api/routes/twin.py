@@ -1,19 +1,19 @@
 """Digital twin management endpoints."""
-
 from __future__ import annotations
 
 import uuid
-from typing import Dict, List
+from datetime import datetime
+from typing import List
 
 from fastapi import APIRouter, HTTPException, status
+from motor.motor_asyncio import AsyncIOMotorCollection  # type: ignore
 from pydantic import BaseModel, Field
 
+from backend.core.database import database_manager
 from backend.models.person import Person
 from backend.models.role import Role
 
 router = APIRouter(prefix="/twins", tags=["twins"])
-
-_IN_MEMORY_TWINS: Dict[str, Dict[str, object]] = {}
 
 
 class TwinCreateRequest(BaseModel):
@@ -25,33 +25,64 @@ class TwinResponse(BaseModel):
     id: str
     person: Person
     roles: List[Role]
+    created_at: datetime
+    updated_at: datetime
+
+
+def _twin_collection() -> AsyncIOMotorCollection:
+    mongodb = database_manager.mongodb
+    if mongodb is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Twin persistence store is unavailable. Ensure MongoDB is configured.",
+        )
+    return mongodb["twinops"]["twins"]
+
+
+def _decode_twin(document: dict) -> TwinResponse:
+    person = Person.model_validate(document["person"])
+    roles = [Role.model_validate(role) for role in document.get("roles", [])]
+    created_at = document.get("created_at") or datetime.utcnow()
+    updated_at = document.get("updated_at") or created_at
+    return TwinResponse(id=str(document.get("_id")), person=person, roles=roles, created_at=created_at, updated_at=updated_at)
 
 
 @router.post("/", response_model=TwinResponse, status_code=status.HTTP_201_CREATED)
 async def create_twin(payload: TwinCreateRequest) -> TwinResponse:
     """Create a new digital twin entity."""
 
+    collection = _twin_collection()
     twin_id = str(uuid.uuid4())
-    _IN_MEMORY_TWINS[twin_id] = {"person": payload.person, "roles": payload.roles}
+    timestamp = datetime.utcnow()
 
-    return TwinResponse(id=twin_id, person=payload.person, roles=payload.roles)
+    document = {
+        "_id": twin_id,
+        "person": payload.person.model_dump(mode="python"),
+        "roles": [role.model_dump(mode="python") for role in payload.roles],
+        "created_at": timestamp,
+        "updated_at": timestamp,
+    }
+
+    await collection.insert_one(document)
+    return _decode_twin(document)
 
 
 @router.get("/{twin_id}", response_model=TwinResponse)
 async def get_twin(twin_id: str) -> TwinResponse:
     """Retrieve a previously created digital twin."""
 
-    twin = _IN_MEMORY_TWINS.get(twin_id)
-    if not twin:
-        raise HTTPException(status_code=404, detail="Twin not found")
-
-    return TwinResponse(id=twin_id, person=twin["person"], roles=twin["roles"])
+    collection = _twin_collection()
+    document = await collection.find_one({"_id": twin_id})
+    if not document:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Twin not found")
+    return _decode_twin(document)
 
 
 @router.get("/", response_model=List[TwinResponse])
 async def list_twins() -> List[TwinResponse]:
-    """List all digital twins (temporary in-memory implementation)."""
+    """List all digital twins persisted in the knowledge store."""
 
-    return [
-        TwinResponse(id=twin_id, person=value["person"], roles=value["roles"]) for twin_id, value in _IN_MEMORY_TWINS.items()
-    ]
+    collection = _twin_collection()
+    cursor = collection.find().sort("person.name", 1)
+    documents = await cursor.to_list(length=200)
+    return [_decode_twin(doc) for doc in documents]

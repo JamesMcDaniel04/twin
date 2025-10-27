@@ -104,6 +104,8 @@ class Settings(BaseSettings):
     PROMETHEUS_PORT: int = 9090
     PROMETHEUS_PUSHGATEWAY: Optional[AnyUrl] = None
     OTEL_EXPORTER_JAEGER_ENDPOINT: Optional[AnyUrl] = None
+    OTEL_EXPORTER_OTLP_ENDPOINT: Optional[AnyUrl] = None
+    OTEL_EXPORTER_OTLP_HEADERS: Optional[str] = None
     JAEGER_AGENT_HOST: str = "localhost"
     JAEGER_AGENT_PORT: int = 6831
     SENTRY_DSN: Optional[str] = None

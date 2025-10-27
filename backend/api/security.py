@@ -7,6 +7,7 @@ from typing import Optional
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 
+from backend.core.auth import api_key_manager
 from backend.core.config import settings
 from backend.core.exceptions import UnauthorizedError
 from backend.core.security import verify_access_token
@@ -43,7 +44,7 @@ async def authenticate_user(
         return user
 
     if api_key:
-        user = _resolve_api_key(api_key)
+        user = await _resolve_api_key(api_key)
         if user:
             request.state.user = user
             return user
@@ -51,7 +52,20 @@ async def authenticate_user(
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
 
 
-def _resolve_api_key(api_key: str) -> Optional[User]:
+async def _resolve_api_key(api_key: str) -> Optional[User]:
+    db_record = await api_key_manager.resolve(api_key)
+    if db_record:
+        attributes = dict(db_record.get("attributes", {}))
+        attributes.setdefault("source", "mongodb")
+        return User(
+            id=db_record.get("id", api_key),
+            email=db_record.get("email", f"{api_key}@twinops.local"),
+            name=db_record.get("name", db_record.get("id", api_key)),
+            role=db_record.get("role", "service"),
+            attributes=attributes,
+            clearance_level=int(attributes.get("clearance", db_record.get("clearance_level", 5))),
+        )
+
     key_entry = settings.API_KEYS.get(api_key)
     if not key_entry:
         return None

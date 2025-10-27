@@ -10,18 +10,22 @@ from typing import Any, Dict, List, Optional, Sequence
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, validator
 
+# Optional dependency for persistence typing
+from motor.motor_asyncio import AsyncIOMotorCollection  # type: ignore
+
 from backend.api.dependencies import get_current_user, get_db
 from backend.core.database import DatabaseManager
 from backend.core.exceptions import DelegationFailureError, KnowledgeNotFoundError
 from backend.core.security import SecurityManager
 from backend.knowledge.retrieval.citations import Citation
 from backend.knowledge.retrieval.feedback import FeedbackSignal, FeedbackManager
-from backend.knowledge.retrieval.graph_rag import (
-    GraphContextProvider,
-    GraphRAGEngine,
-    RetrievalSummary,
-    TextRetriever,
-    create_graph_rag_engine,
+from backend.knowledge.retrieval.graph_rag import GraphRAGEngine, RetrievalSummary, create_graph_rag_engine
+from backend.knowledge.retrieval.offline import (
+    FALLBACK_KNOWLEDGE_BASE,
+    InMemoryGraphProvider,
+    InMemoryTextRetriever,
+    LocalEmbeddingGenerator,
+    seed_vector_store,
 )
 from backend.knowledge.retrieval.ranker import HybridRanker
 from backend.knowledge.vector.search import VectorSearchService
@@ -88,109 +92,6 @@ class SimpleEncryptionService:
         return f"enc::{value}"
 
 
-class LocalEmbeddingGenerator:
-    """Deterministic, offline embedding generator for development and testing."""
-
-    def __init__(self, dimensions: int = 32) -> None:
-        self.dimensions = dimensions
-
-    async def generate(self, chunks: Sequence[str]) -> List[List[float]]:
-        return [self._encode(chunk) for chunk in chunks]
-
-    def encode_sync(self, text: str) -> List[float]:
-        return self._encode(text)
-
-    def _encode(self, text: str) -> List[float]:
-        tokens = text.lower().split()
-        vector = [0.0] * self.dimensions
-        for index, token in enumerate(tokens[: self.dimensions]):
-            token_value = sum(ord(char) for char in token) % 997
-            vector[index] = token_value / 997.0
-        return vector
-
-
-KNOWLEDGE_BASE = [
-    {
-        "document_id": "doc-aws-infra",
-        "title": "AWS Infrastructure Ownership",
-        "summary": "The AWS infrastructure is managed by the SRE platform team led by the Infra Lead.",
-        "source": "confluence",
-        "direct_link": "https://confluence.local/aws-infra",
-        "entities": ["AWS", "Infrastructure", "SRE", "Infra Lead"],
-        "page_number": 4,
-    },
-    {
-        "document_id": "doc-incident-runbook",
-        "title": "High Severity Incident Runbook",
-        "summary": "Runbook outlining steps to mitigate high severity incidents involving core services.",
-        "source": "notion",
-        "direct_link": "https://notion.local/runbooks/high-sev",
-        "entities": ["Incident", "Runbook", "Infra Lead"],
-        "page_number": 2,
-    },
-    {
-        "document_id": "doc-oncall-rotation",
-        "title": "On-call Rotation",
-        "summary": "Infra On-call rotation includes Infra Lead and SRE Backup for after-hours coverage.",
-        "source": "slack",
-        "direct_link": "https://slack.local/archives/oncall",
-        "entities": ["On-call", "Infra Lead", "SRE Backup"],
-        "page_number": 1,
-    },
-]
-
-
-class InMemoryGraphProvider(GraphContextProvider):
-    def __init__(self, knowledge: Sequence[Dict[str, Any]]) -> None:
-        self.knowledge = list(knowledge)
-
-    async def expand(self, query: str) -> List[Dict[str, Any]]:
-        tokens = set(query.lower().split())
-        context: List[Dict[str, Any]] = []
-        for item in self.knowledge:
-            item_tokens = set(item["summary"].lower().split()) | {entity.lower() for entity in item["entities"]}
-            if tokens & item_tokens:
-                context.append(
-                    {
-                        "document_id": item["document_id"],
-                        "nodes": item["entities"],
-                        "nodes_relevant": item["entities"],
-                        "metadata": {
-                            "title": item["title"],
-                            "summary": item["summary"],
-                            "source": item["source"],
-                            "direct_link": item["direct_link"],
-                        },
-                    }
-                )
-        return context
-
-
-class InMemoryTextRetriever(TextRetriever):
-    def __init__(self, knowledge: Sequence[Dict[str, Any]]) -> None:
-        self.knowledge = list(knowledge)
-
-    async def search(self, query: str, context: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        query_lower = query.lower()
-        results: List[Dict[str, Any]] = []
-        for item in self.knowledge:
-            if query_lower in item["summary"].lower() or any(q in query_lower for q in item["entities"]):
-                results.append(
-                    {
-                        "document_id": item["document_id"],
-                        "score": 0.5,
-                        "metadata": {
-                            "title": item["title"],
-                            "summary": item["summary"],
-                            "source": item["source"],
-                            "direct_link": item["direct_link"],
-                            "page_number": item["page_number"],
-                        },
-                    }
-                )
-        return results
-
-
 class AuditContext(BaseModel):
     audit_logger: ModuleAuditLogger
 
@@ -203,23 +104,14 @@ audit_logger = ModuleAuditLogger()
 monitoring_service = MonitoringService()
 embedding_generator = LocalEmbeddingGenerator()
 vector_service = VectorSearchService()
+KNOWLEDGE_BASE = list(FALLBACK_KNOWLEDGE_BASE)
 graph_provider = InMemoryGraphProvider(KNOWLEDGE_BASE)
 text_retriever = InMemoryTextRetriever(KNOWLEDGE_BASE)
 ranker = HybridRanker()
 feedback_manager = FeedbackManager()
 
 # Seed fallback vector store
-for item in KNOWLEDGE_BASE:
-    vector_service._fallback_store[item["document_id"]] = {
-        "embedding": embedding_generator.encode_sync(f"{item['title']} {item['summary']}"),
-        "metadata": {
-            "title": item["title"],
-            "summary": item["summary"],
-            "direct_link": item["direct_link"],
-            "source": item["source"],
-            "page_number": item["page_number"],
-        },
-    }
+seed_vector_store(vector_service, embedding_generator, KNOWLEDGE_BASE)
 
 
 graph_rag_engine: GraphRAGEngine = create_graph_rag_engine(
@@ -412,6 +304,43 @@ class WorkflowExecutor:
 workflow_executor = WorkflowExecutor()
 
 # ---------------------------------------------------------------------------
+# Snapshot persistence helpers
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_collection() -> AsyncIOMotorCollection:
+    mongodb = database_manager.mongodb
+    if mongodb is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Snapshot persistence store is unavailable. Ensure MongoDB is configured.",
+        )
+    return mongodb["twinops"]["twin_snapshots"]
+
+
+def _coerce_datetime(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return datetime.fromtimestamp(0)
+    return datetime.utcnow()
+
+
+def _decode_snapshot(document: Dict[str, Any]) -> SnapshotResponse:
+    knowledge_payload = document.get("knowledge", []) or []
+    knowledge = [TwinKnowledgeModel.model_validate(item) for item in knowledge_payload]
+    return SnapshotResponse(
+        snapshot_id=str(document.get("_id")),
+        role_id=str(document.get("role_id")),
+        created_at=_coerce_datetime(document.get("created_at")),
+        metadata=dict(document.get("metadata", {})),
+        knowledge=knowledge,
+    )
+
+# ---------------------------------------------------------------------------
 # Pydantic schemas
 # ---------------------------------------------------------------------------
 
@@ -503,6 +432,7 @@ class SnapshotResponse(BaseModel):
     role_id: str
     created_at: datetime
     metadata: Dict[str, Any]
+    knowledge: List[TwinKnowledgeModel] = Field(default_factory=list)
 
 
 class WorkflowInput(BaseModel):
@@ -671,9 +601,6 @@ async def get_twin_details(role_id: str, audit_ctx: AuditContext = Depends(get_a
     return TwinDetailsResponse(role=role, knowledge=knowledge, last_updated=datetime.utcnow())
 
 
-SNAPSHOT_STORE: Dict[str, List[SnapshotResponse]] = {}
-
-
 @router.post(
     "/v1/twins/{role_id}/snapshot",
     response_model=SnapshotResponse,
@@ -689,14 +616,68 @@ async def create_twin_snapshot(
     if role_id not in DEFAULT_ROLES:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
 
+    collection = _snapshot_collection()
+    created_at = datetime.utcnow()
+
+    knowledge: List[TwinKnowledgeModel] = []
+    try:
+        summary = await graph_rag_engine.retrieve(DEFAULT_ROLES[role_id].name, top_k=3)
+    except KnowledgeNotFoundError:
+        summary = None
+
+    if summary:
+        knowledge = [
+            TwinKnowledgeModel(
+                document_id=doc.document_id,
+                title=doc.metadata.get("title", ""),
+                summary=doc.metadata.get("summary") or doc.metadata.get("chunk", ""),
+                citations=[CitationModel.from_dataclass(citation) for citation in doc.citations],
+            )
+            for doc in summary.documents
+        ]
+
     snapshot = SnapshotResponse(
         snapshot_id=str(uuid.uuid4()),
         role_id=role_id,
-        created_at=datetime.utcnow(),
-        metadata={"note": payload.note, "captured_documents": [item["document_id"] for item in KNOWLEDGE_BASE]},
+        created_at=created_at,
+        metadata={
+            "note": payload.note,
+            "captured_documents": [item.document_id for item in knowledge],
+        },
+        knowledge=knowledge,
     )
-    SNAPSHOT_STORE.setdefault(role_id, []).append(snapshot)
+
+    await collection.insert_one(
+        {
+            "_id": snapshot.snapshot_id,
+            "role_id": snapshot.role_id,
+            "created_at": snapshot.created_at,
+            "metadata": snapshot.metadata,
+            "knowledge": [item.model_dump(mode="python") for item in snapshot.knowledge],
+        }
+    )
+
     return snapshot
+
+
+@router.get(
+    "/v1/twins/{role_id}/snapshot",
+    response_model=List[SnapshotResponse],
+    status_code=status.HTTP_200_OK,
+)
+@audit_log
+async def list_twin_snapshots(
+    role_id: str,
+    audit_ctx: AuditContext = Depends(get_audit_context),
+) -> List[SnapshotResponse]:
+    del audit_ctx
+    if role_id not in DEFAULT_ROLES:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
+
+    collection = _snapshot_collection()
+    cursor = collection.find({"role_id": role_id}).sort("created_at", -1)
+    documents = await cursor.to_list(length=200)
+    return [_decode_snapshot(document) for document in documents]
 
 
 @router.post(

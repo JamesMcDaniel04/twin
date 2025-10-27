@@ -366,6 +366,83 @@ docker-compose logs backend | grep "request_id=abc123"
 
 ---
 
+## Telemetry Verification
+
+TwinOps exports traces via OpenTelemetry. Configure exporters using environment variables:
+
+```env
+OTEL_EXPORTER_JAEGER_ENDPOINT=http://jaeger:14268/api/traces
+OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
+OTEL_EXPORTER_OTLP_HEADERS=authorization=Bearer your-token
+```
+
+Send a diagnostic span to confirm connectivity:
+
+```bash
+poetry run python scripts/verify_tracing.py
+```
+
+Look for the span named `telemetry_verification` in Jaeger/Tempo to verify ingestion.
+
+---
+
+## API Access Provisioning
+
+Use the admin API to provision service credentials.
+
+1. Authenticate as an admin (role `system`/`admin` or clearance ≥ 8).
+2. Create a long-lived API key (value returned once):
+
+```bash
+curl -X POST http://localhost:8080/api/admin/api-keys \
+  -H "Authorization: Bearer <admin-jwt>" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "name": "automation-bot",
+        "email": "automation@twinops.local",
+        "role": "service",
+        "clearance_level": 6,
+        "attributes": {"team": "automation"}
+      }'
+```
+
+3. Issue a short-lived JWT:
+
+```bash
+curl -X POST http://localhost:8080/api/admin/jwt \
+  -H "Authorization: X-API-Key <admin-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "subject": "cli-runner",
+        "role": "service",
+        "email": "cli@twinops.local",
+        "clearance_level": 4,
+        "expires_minutes": 120
+      }'
+```
+
+API keys are persisted in MongoDB (`twinops.api_keys`) and can be listed or revoked via the same API.
+
+---
+
+## Seeding Delegation Graph
+
+Populate Neo4j with roles, people, and delegation relationships for local testing:
+
+```bash
+poetry run python scripts/seed_roles.py
+```
+
+The seed job creates:
+
+- `Role` nodes with `DELEGATES_TO` / `REPORTS_TO` links and responsibilities
+- `Person` nodes with `HOLDS_ROLE` relations and availability metadata
+- `Responsibility` nodes connected via `RESPONSIBLE_FOR`
+
+Modify `scripts/seed_roles.py` to reflect your organisation before running in shared environments.
+
+---
+
 ## Contributing
 
 1. Fork the repository
