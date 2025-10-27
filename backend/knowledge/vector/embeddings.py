@@ -17,6 +17,8 @@ class EmbeddingGenerator:
     """Wrapper around OpenAI embedding API with retry handling."""
 
     def __init__(self) -> None:
+        if not settings.OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY is required for embedding generation")
         self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
         self.model = settings.EMBEDDING_MODEL
         self.batch_size = 16

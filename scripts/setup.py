@@ -38,7 +38,7 @@ async def setup_neo4j() -> None:
 
 
 async def setup_elasticsearch() -> None:
-    es = AsyncElasticsearch(settings.ELASTICSEARCH_URL)
+    es = AsyncElasticsearch(str(settings.ELASTICSEARCH_URL))
     exists = await es.indices.exists(index="twinops-documents")
     if not exists:
         await es.indices.create(

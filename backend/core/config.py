@@ -12,7 +12,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import List, Optional
 
-from pydantic import AnyUrl, Field, field_validator
+from pydantic import AnyUrl, Field, PositiveInt, field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -28,8 +28,11 @@ class Settings(BaseSettings):
 
     # Security / auth
     SECRET_KEY: str = Field("changeme", env="TWINOPS_SECRET_KEY")
+    JWT_SECRET_KEY: str = Field("changeme", env="JWT_SECRET_KEY")
+    JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     ALLOWED_ORIGINS: List[str] = Field(default_factory=lambda: ["*"])
+    ENCRYPTION_KEY: Optional[str] = None
 
     # Database connections
     NEO4J_URI: AnyUrl = Field("neo4j://localhost:7687")
@@ -39,6 +42,7 @@ class Settings(BaseSettings):
     PINECONE_API_KEY: str = Field("pinecone-api-key")
     PINECONE_ENVIRONMENT: str = Field("us-east-1-aws")
     PINECONE_INDEX: str = "twinops-knowledge"
+    PINECONE_DIMENSION: PositiveInt = 1536
 
     REDIS_URL: AnyUrl = Field("redis://localhost:6379/0")
     MONGODB_URL: AnyUrl = Field("mongodb://localhost:27017")
@@ -47,27 +51,60 @@ class Settings(BaseSettings):
     ELASTICSEARCH_URL: AnyUrl = Field("http://localhost:9200")
     TEMPORAL_NAMESPACE: str = "twinops"
     TEMPORAL_TASK_QUEUE: str = "twinops-workflows"
+    TEMPORAL_HOST: str = "localhost:7233"
     KAFKA_BOOTSTRAP_SERVERS: str = "localhost:9092"
 
     # Integrations
     SLACK_BOT_TOKEN: str = Field("xoxb-placeholder")
     SLACK_SIGNING_SECRET: str = Field("slack-signing-secret")
+    SLACK_APP_TOKEN: Optional[str] = None
     JIRA_BASE_URL: Optional[AnyUrl] = None
+    JIRA_EMAIL: Optional[str] = None
     JIRA_API_TOKEN: Optional[str] = None
     GOOGLE_SERVICE_ACCOUNT_FILE: Optional[Path] = None
+    GOOGLE_APPLICATION_CREDENTIALS: Optional[Path] = None
     GITHUB_APP_ID: Optional[str] = None
     GITHUB_PRIVATE_KEY_PATH: Optional[Path] = None
+    GITHUB_TOKEN: Optional[str] = None
+    CONFLUENCE_URL: Optional[AnyUrl] = None
+    CONFLUENCE_EMAIL: Optional[str] = None
+    CONFLUENCE_API_TOKEN: Optional[str] = None
 
     # LLM provider configuration
     OPENAI_API_KEY: Optional[str] = None
     CLAUDE_API_KEY: Optional[str] = None
+    ANTHROPIC_API_KEY: Optional[str] = None
     OPENAI_MODEL: str = "gpt-4"
     CLAUDE_MODEL: str = "claude-3-opus-20240229"
     EMBEDDING_MODEL: str = "text-embedding-ada-002"
+    MAX_TOKENS: int = 4096
+    TEMPERATURE: float = 0.7
 
     # Monitoring / tracing
+    PROMETHEUS_PORT: int = 9090
     PROMETHEUS_PUSHGATEWAY: Optional[AnyUrl] = None
     OTEL_EXPORTER_JAEGER_ENDPOINT: Optional[AnyUrl] = None
+    JAEGER_AGENT_HOST: str = "localhost"
+    JAEGER_AGENT_PORT: int = 6831
+    SENTRY_DSN: Optional[str] = None
+    SENTRY_ENVIRONMENT: str = "development"
+
+    # Rate limiting / performance tuning
+    RATE_LIMIT_PER_MINUTE: int = 60
+    RATE_LIMIT_PER_HOUR: int = 1000
+    QUERY_TIMEOUT_SECONDS: int = 30
+    MAX_CONCURRENT_QUERIES: int = 100
+    VECTOR_SEARCH_TOP_K: int = 20
+    GRAPH_TRAVERSAL_MAX_DEPTH: int = 3
+
+    # Feature flags
+    ENABLE_SLACK_BOT: bool = True
+    ENABLE_JIRA_INTEGRATION: bool = True
+    ENABLE_GITHUB_INTEGRATION: bool = True
+    ENABLE_GOOGLE_WORKSPACE: bool = True
+    ENABLE_WORKFLOW_AUTOMATION: bool = True
+    ENABLE_ADVANCED_GRAPH_RAG: bool = True
+    ENABLE_AUTO_DELEGATION: bool = True
 
     class Config:
         env_file = ".env"

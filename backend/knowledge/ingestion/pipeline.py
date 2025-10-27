@@ -27,7 +27,7 @@ class IngestionPipeline:
         self.metadata_extractor = MetadataExtractor()
         self.chunker = TextChunker()
         self.embedder = EmbeddingGenerator()
-        self.es = AsyncElasticsearch(settings.ELASTICSEARCH_URL)
+        self.es = AsyncElasticsearch(str(settings.ELASTICSEARCH_URL))
 
     async def ingest_document(self, source: str, content: bytes, metadata: dict):
         document_id = metadata.get("id", str(uuid.uuid4()))

@@ -28,7 +28,7 @@ class WorkflowEngine:
         async with self._lock:
             if not self._client:
                 try:
-                    self._client = await Client.connect("localhost:7233", namespace=settings.TEMPORAL_NAMESPACE)
+                    self._client = await Client.connect(settings.TEMPORAL_HOST, namespace=settings.TEMPORAL_NAMESPACE)
                 except Exception as exc:  # pragma: no cover - Temporal not available in tests
                     logger.warning("Temporal connection failed: %s", exc)
                     raise

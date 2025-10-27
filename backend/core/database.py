@@ -36,9 +36,18 @@ class DatabaseManager:
             auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD),
         )
 
-        # Pinecone initialization
-        self.pinecone = Pinecone(api_key=settings.PINECONE_API_KEY)
-        self.index = self.pinecone.Index(settings.PINECONE_INDEX)
+        # Pinecone initialization (optional)
+        if settings.PINECONE_API_KEY and settings.PINECONE_INDEX:
+            try:
+                self.pinecone = Pinecone(api_key=settings.PINECONE_API_KEY)
+                self.index = self.pinecone.Index(settings.PINECONE_INDEX)
+                logger.info("Pinecone index '%s' ready", settings.PINECONE_INDEX)
+            except Exception as exc:  # pragma: no cover - network / credential errors
+                logger.error("Failed to initialize Pinecone index: %s", exc)
+                self.pinecone = None
+                self.index = None
+        else:
+            logger.warning("Pinecone credentials missing; vector search fallback will be used.")
 
         # Redis connection
         self.redis = await redis.from_url(str(settings.REDIS_URL), decode_responses=True)
