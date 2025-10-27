@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
+
 from fastapi import status
 
 
@@ -33,10 +36,6 @@ class ValidationError(ApplicationError):
 class UnauthorizedError(ApplicationError):
     status_code = status.HTTP_401_UNAUTHORIZED
     code = "unauthorized"
-from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Any, Dict, Optional
 
 
 @dataclass
