@@ -139,8 +139,7 @@ class GraphRAGEngine:
             for node_id in context.get("nodes_relevant", context.get("nodes", []))
         }
         if not relevant_documents:
-            precision = sum(1 for doc in documents if doc.score >= 0.5) / len(documents)
-            return float(precision), 0.0
+            return 0.0, 0.0
 
         hits = sum(1 for doc in documents if doc.document_id in relevant_documents)
         precision = hits / len(documents)

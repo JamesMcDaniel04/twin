@@ -19,13 +19,13 @@ class HybridRanker:
         merged: Dict[str, Dict[str, Any]] = {}
 
         for result in vector_results:
-            doc_id = result.get("id") or result.get("metadata", {}).get("document_id")
+            doc_id = result.get("document_id") or result.get("id") or result.get("metadata", {}).get("document_id")
             merged.setdefault(doc_id, {"score": 0.0, "vector_score": 0.0, "text_score": 0.0, "graph_score": 0.0})
             merged[doc_id]["vector_score"] = result.get("score", 0.0)
             merged[doc_id]["metadata"] = result.get("metadata", {})
 
         for result in text_results:
-            doc_id = result.get("metadata", {}).get("document_id") or result.get("id")
+            doc_id = result.get("document_id") or result.get("metadata", {}).get("document_id") or result.get("id")
             merged.setdefault(doc_id, {"score": 0.0, "vector_score": 0.0, "text_score": 0.0, "graph_score": 0.0})
             merged[doc_id]["text_score"] = result.get("score", 0.0)
             merged[doc_id].setdefault("metadata", {}).update(result.get("metadata", {}))
