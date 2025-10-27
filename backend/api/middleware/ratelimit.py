@@ -10,6 +10,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, Response
 
 from backend.core.database import database_manager
+from backend.core.exceptions import UnauthorizedError
+from backend.core.security import verify_access_token
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -21,13 +23,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self.window_seconds = window_seconds
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        client_ip = request.client.host if request.client else "anonymous"
+        identifier = self._derive_identifier(request)
         redis = database_manager.redis
 
         if redis is None:
             return await call_next(request)
 
-        bucket = f"ratelimit:{client_ip}"
+        bucket = f"ratelimit:{identifier}"
         current_ts = int(time.time())
 
         ttl = await redis.ttl(bucket)
@@ -50,4 +52,36 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         response.headers["X-RateLimit-Limit"] = str(self.requests)
         response.headers["X-RateLimit-Remaining"] = str(max(self.requests - remaining, 0))
+        response.headers["X-RateLimit-Key"] = identifier
         return response
+
+    def _derive_identifier(self, request: Request) -> str:
+        api_key = request.headers.get("X-API-Key")
+        if api_key:
+            return f"api:{api_key}"
+
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ", 1)[1]
+            try:
+                payload = verify_access_token(token)
+                subject = payload.get("sub", "anonymous")
+                org = payload.get("org") or payload.get("tenant")
+                if org:
+                    return f"user:{org}:{subject}"
+                return f"user:{subject}"
+            except UnauthorizedError:
+                return f"token:{hash(token)}"
+
+        user = getattr(request.state, "user", None)
+        if user and getattr(user, "id", None):
+            org = None
+            attributes = getattr(user, "attributes", {})
+            if isinstance(attributes, dict):
+                org = attributes.get("org") or attributes.get("tenant")
+            if org:
+                return f"user:{org}:{user.id}"
+            return f"user:{user.id}"
+
+        client_ip = request.client.host if request.client else "anonymous"
+        return f"ip:{client_ip}"

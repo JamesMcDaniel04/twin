@@ -15,9 +15,11 @@ from backend.api.middleware.ratelimit import RateLimitMiddleware
 from backend.core.config import settings
 from backend.core.database import database_manager
 from backend.core.exceptions import ApplicationError
+from backend.core.observability import setup_tracing
 from backend.integrations.slack.bot import slack_bot
 from backend.orchestration.consumer import response_consumer
 from backend.orchestration.publisher import event_publisher
+from backend.workflows.engine import workflow_engine
 
 
 @asynccontextmanager
@@ -26,6 +28,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
     await database_manager.initialize()
     await response_consumer.start()
+    await workflow_engine.start_worker()
     if settings.SLACK_APP_TOKEN:
         await slack_bot.start_socket_mode()
 
@@ -35,6 +38,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         if settings.SLACK_APP_TOKEN:
             await slack_bot.stop_socket_mode()
         await response_consumer.stop()
+        await workflow_engine.stop_worker()
         await database_manager.close()
         await event_publisher.close()
 
@@ -45,6 +49,8 @@ app = FastAPI(
     debug=settings.DEBUG,
     lifespan=lifespan,
 )
+
+setup_tracing(app)
 
 app.add_middleware(
     CORSMiddleware,

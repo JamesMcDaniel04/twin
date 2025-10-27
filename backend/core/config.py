@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import AnyUrl, Field, PositiveInt, field_validator
 from pydantic_settings import BaseSettings
@@ -33,6 +33,16 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     ALLOWED_ORIGINS: List[str] = Field(default_factory=lambda: ["*"])
     ENCRYPTION_KEY: Optional[str] = None
+    API_KEYS: Dict[str, Dict[str, str]] = Field(
+        default_factory=lambda: {
+            "local-dev-key": {
+                "id": "dev-service",
+                "name": "Local Developer",
+                "email": "dev@twinops.local",
+                "role": "system",
+            }
+        }
+    )
 
     # Database connections
     NEO4J_URI: AnyUrl = Field("neo4j://localhost:7687")

@@ -306,11 +306,19 @@ class InMemoryAvailabilityService:
 
 
 class InMemoryGraphClient:
-    async def run(self, query: str, parameters: Dict[str, Any]):
-        role_id = parameters["role_id"]
+    async def fetch_delegates(
+        self,
+        role_id: str,
+        responsibility: Optional[str],
+        *,
+        limit: int,
+    ) -> List[Dict[str, Any]]:
         role = DEFAULT_ROLES.get(role_id)
         chain = role.delegation_chain if role else []
-        return [{"role_id": item} for item in chain]
+        delegates: List[Dict[str, Any]] = []
+        for candidate in chain[:limit]:
+            delegates.append({"role_id": candidate, "availability": "available", "person_id": None, "hops": 1})
+        return delegates
 
 
 class InMemoryRoleRepository:

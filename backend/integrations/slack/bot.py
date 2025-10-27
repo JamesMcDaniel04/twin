@@ -9,6 +9,7 @@ import re
 import textwrap
 from typing import Any, Dict, List, Optional, Tuple
 
+from opentelemetry import trace
 from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
@@ -19,6 +20,7 @@ from backend.orchestration.router import router as orchestration_router
 from backend.orchestration.session import SessionState, session_store
 
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 class SlackBot:
@@ -80,31 +82,36 @@ class SlackBot:
         channel_id = body.get("channel_id")
         user_id = body.get("user_id")
         text = (body.get("text") or "").strip()
+        with tracer.start_as_current_span("slack.handle_twin_command") as span:
+            span.set_attribute("slack.channel_id", channel_id or "")
+            span.set_attribute("slack.user_id", user_id or "")
+            span.set_attribute("command.text", text)
 
-        if not text:
+            if not text:
+                await respond(
+                    {
+                        "response_type": "ephemeral",
+                        "text": "Usage: `/twin <your question>`\nTry `/twin Who owns the production deploy pipeline?`",
+                    }
+                )
+                span.set_attribute("result", "prompted_help")
+                return
+
             await respond(
                 {
                     "response_type": "ephemeral",
-                    "text": "Usage: `/twin <your question>`\nTry `/twin Who owns the production deploy pipeline?`",
+                    "text": f"🔍 Searching TwinOps knowledge base for _{text}_ …",
                 }
             )
-            return
 
-        await respond(
-            {
-                "response_type": "ephemeral",
-                "text": f"🔍 Searching TwinOps knowledge base for _{text}_ …",
-            }
-        )
-
-        session_id, _ = await self._ensure_session(channel_id, user_id)
-        await self._dispatch_query(
-            respond,
-            session_id,
-            user_id,
-            text,
-            response_mode="in_channel",
-        )
+            session_id, _ = await self._ensure_session(channel_id, user_id)
+            await self._dispatch_query(
+                respond,
+                session_id,
+                user_id,
+                text,
+                response_mode="in_channel",
+            )
 
     async def handle_delegate_command(self, ack, body, respond):
         await ack()
@@ -167,13 +174,19 @@ class SlackBot:
         text = (event.get("text") or "")
         query = re.sub(r"<@[A-Z0-9]+>", "", text).strip()
 
-        if not query:
-            await say("Hi! Ask me a question about your operational knowledge base.")
-            return
+        with tracer.start_as_current_span("slack.handle_mention") as span:
+            span.set_attribute("slack.channel_id", channel_id or "")
+            span.set_attribute("slack.user_id", user_id or "")
+            span.set_attribute("slack.query", query)
 
-        await say(f"🔎 Working on that, <@{user_id}> …")
-        session_id, _ = await self._ensure_session(channel_id, user_id)
-        await self._dispatch_query(say, session_id, user_id, query)
+            if not query:
+                await say("Hi! Ask me a question about your operational knowledge base.")
+                span.set_attribute("slack.response", "prompted_help")
+                return
+
+            await say(f"🔎 Working on that, <@{user_id}> …")
+            session_id, _ = await self._ensure_session(channel_id, user_id)
+            await self._dispatch_query(say, session_id, user_id, query)
 
     async def handle_message(self, body, say):
         event = body.get("event", {})
@@ -184,8 +197,12 @@ class SlackBot:
         text = (event.get("text") or "").strip()
         if not text:
             return
-        session_id, _ = await self._ensure_session(channel_id, user_id)
-        await self._dispatch_query(say, session_id, user_id, text)
+        with tracer.start_as_current_span("slack.handle_message") as span:
+            span.set_attribute("slack.channel_id", channel_id or "")
+            span.set_attribute("slack.user_id", user_id or "")
+            span.set_attribute("slack.query", text)
+            session_id, _ = await self._ensure_session(channel_id, user_id)
+            await self._dispatch_query(say, session_id, user_id, text)
 
     # ------------------------------------------------------------------
     # Interactive components
@@ -212,18 +229,24 @@ class SlackBot:
         response = payload.get("response")
         citations = payload.get("citations", [])
         documents = payload.get("documents", [])
+        with tracer.start_as_current_span("slack.dispatch_async_response") as span:
+            span.set_attribute("session.id", session_id or "")
+            span.set_attribute("has_response", bool(response))
 
-        channel_id, _ = self._decode_session_id(session_id)
-        if not channel_id or not response:
-            logger.warning("Unable to dispatch async response: payload=%s", payload)
-            return
+            channel_id, _ = self._decode_session_id(session_id)
+            if not channel_id or not response:
+                logger.warning("Unable to dispatch async response: payload=%s", payload)
+                span.set_attribute("result", "dropped")
+                return
 
-        ranking = payload.get("ranking") or {}
-        blocks = self._build_response_blocks(response, citations, documents, ranking.get("weights"))
-        try:
-            await self.app.client.chat_postMessage(channel=channel_id, text=response, blocks=blocks)
-        except Exception as exc:  # pragma: no cover - Slack API errors
-            logger.error("Failed to post async Slack message: %s", exc)
+            ranking = payload.get("ranking") or {}
+            blocks = self._build_response_blocks(response, citations, documents, ranking.get("weights"))
+            try:
+                await self.app.client.chat_postMessage(channel=channel_id, text=response, blocks=blocks)
+                span.set_attribute("result", "sent")
+            except Exception as exc:  # pragma: no cover - Slack API errors
+                span.record_exception(exc)
+                logger.error("Failed to post async Slack message: %s", exc)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -238,36 +261,43 @@ class SlackBot:
         *,
         response_mode: Optional[str] = None,
     ) -> None:
-        try:
-            result = await orchestration_router.route(session_id=session_id, user_id=user_id, text=text)
-        except KnowledgeNotFoundError as exc:
-            await self._emit_message(
-                responder,
-                text=f"🙇 Sorry, I couldn't find anything relevant.\n```{exc.message}```",
-                response_mode="ephemeral" if response_mode else None,
-            )
-            return
-        except Exception as exc:
-            logger.exception("Slack query failed: %s", exc)
-            await self._emit_message(
-                responder,
-                text="⚠️ Something went wrong. Try again shortly.",
-                response_mode="ephemeral" if response_mode else None,
-            )
-            return
+        with tracer.start_as_current_span("slack.dispatch_query") as span:
+            span.set_attribute("session.id", session_id)
+            span.set_attribute("slack.user_id", user_id)
+            span.set_attribute("query.length", len(text))
+            try:
+                result = await orchestration_router.route(session_id=session_id, user_id=user_id, text=text)
+            except KnowledgeNotFoundError as exc:
+                span.set_attribute("result", "not_found")
+                await self._emit_message(
+                    responder,
+                    text=f"🙇 Sorry, I couldn't find anything relevant.\n```{exc.message}```",
+                    response_mode="ephemeral" if response_mode else None,
+                )
+                return
+            except Exception as exc:
+                span.record_exception(exc)
+                logger.exception("Slack query failed: %s", exc)
+                await self._emit_message(
+                    responder,
+                    text="⚠️ Something went wrong. Try again shortly.",
+                    response_mode="ephemeral" if response_mode else None,
+                )
+                return
 
-        blocks = self._build_response_blocks(
-            result["response"],
-            result.get("citations", []),
-            result.get("documents", []),
-            result.get("weights"),
-        )
-        await self._emit_message(
-            responder,
-            text=result["response"],
-            blocks=blocks,
-            response_mode=response_mode,
-        )
+            span.set_attribute("result", "ok")
+            blocks = self._build_response_blocks(
+                result["response"],
+                result.get("citations", []),
+                result.get("documents", []),
+                result.get("weights"),
+            )
+            await self._emit_message(
+                responder,
+                text=result["response"],
+                blocks=blocks,
+                response_mode=response_mode,
+            )
 
     async def _ensure_session(self, channel_id: str, user_id: str) -> Tuple[str, SessionState]:
         session_id = f"slack:{channel_id}:{user_id}"

@@ -8,10 +8,12 @@ import logging
 from typing import Any, Dict
 
 from aiokafka import AIOKafkaProducer
+from opentelemetry import trace
 
 from backend.core.config import settings
 
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 class EventPublisher:
@@ -38,10 +40,16 @@ class EventPublisher:
         producer = await self._ensure_producer()
         if producer is None:
             return
-        try:
-            await producer.send_and_wait(topic, json.dumps(payload).encode("utf-8"))
-        except Exception as exc:  # pragma: no cover - Kafka optional
-            logger.error("Failed to publish event: %s", exc)
+        encoded = json.dumps(payload).encode("utf-8")
+        with tracer.start_as_current_span("kafka.publish") as span:
+            span.set_attribute("messaging.system", "kafka")
+            span.set_attribute("messaging.destination", topic)
+            span.set_attribute("payload.bytes", len(encoded))
+            try:
+                await producer.send_and_wait(topic, encoded)
+            except Exception as exc:  # pragma: no cover - Kafka optional
+                span.record_exception(exc)
+                logger.error("Failed to publish event: %s", exc)
 
     async def close(self) -> None:
         if self._producer:

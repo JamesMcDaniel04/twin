@@ -8,18 +8,20 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from elasticsearch import AsyncElasticsearch
+from opentelemetry import trace
 
 from backend.core.config import settings
 from backend.core.database import database_manager
 from backend.knowledge.graph.manager import graph_manager
 from backend.knowledge.ingestion.chunkers import TextChunker
 from backend.knowledge.ingestion.extractors import EntityExtractor, MetadataExtractor
-from backend.knowledge.ingestion.parsers import ParsedDocument, DocumentParser
+from backend.knowledge.ingestion.parsers import DocumentParser, ParsedDocument
 from backend.knowledge.ingestion.storage import ObjectStorageClient, ObjectStorageError
 from backend.knowledge.vector.embeddings import EmbeddingGenerator
 from backend.knowledge.vector.index import vector_index
 
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 class IngestionPipeline:
@@ -36,52 +38,58 @@ class IngestionPipeline:
         document_id = str(metadata.get("id") or uuid.uuid4())
         mime_type = str(metadata.get("mime_type") or "text/plain")
 
-        # 1. Parse document
-        parsed = await self.parser.parse(content, mime_type)
+        with tracer.start_as_current_span("ingestion.ingest_document") as span:
+            span.set_attribute("document.id", document_id)
+            span.set_attribute("document.source", source)
+            span.set_attribute("document.mime_type", mime_type)
 
-        # 2. Extract entities and metadata
-        entities = await self.extract_entities(parsed.text)
-        enriched_metadata = await self.extract_metadata(parsed)
-        enriched_metadata.update(
-            {
+            with tracer.start_as_current_span("ingestion.parse"):
+                parsed = await self.parser.parse(content, mime_type)
+
+            with tracer.start_as_current_span("ingestion.entities"):
+                entities = await self.extract_entities(parsed.text)
+            span.set_attribute("entities.count", len(entities))
+            with tracer.start_as_current_span("ingestion.metadata"):
+                enriched_metadata = await self.extract_metadata(parsed)
+            enriched_metadata.update(
+                {
+                    "source": source,
+                    "document_id": document_id,
+                    "ingested_at": datetime.utcnow().isoformat(),
+                }
+            )
+
+            with tracer.start_as_current_span("ingestion.persist_blob"):
+                blob_uri = await self._persist_raw_blob(document_id, source, mime_type, content, metadata)
+            if blob_uri:
+                enriched_metadata["blob_uri"] = blob_uri
+
+            with tracer.start_as_current_span("ingestion.chunk"):
+                chunks = self.chunk_text(parsed.text, chunk_size=512, overlap=128)
+            span.set_attribute("chunks.count", len(chunks))
+
+            with tracer.start_as_current_span("ingestion.embed"):
+                embeddings = await self.generate_embeddings(chunks)
+            span.set_attribute("embeddings.count", len(embeddings))
+
+            document_payload = {
+                "id": document_id,
+                "title": metadata.get("title", "Untitled"),
                 "source": source,
-                "document_id": document_id,
-                "ingested_at": datetime.utcnow().isoformat(),
+                "uri": metadata.get("uri") or blob_uri,
+                "tags": metadata.get("tags", []),
+                "metadata": enriched_metadata,
             }
-        )
 
-        # 3. Persist raw binary to object storage
-        blob_uri = await self._persist_raw_blob(document_id, source, mime_type, content, metadata)
-        if blob_uri:
-            enriched_metadata["blob_uri"] = blob_uri
+            with tracer.start_as_current_span("ingestion.update_graph"):
+                await self.update_graph(entities, document_payload)
+            with tracer.start_as_current_span("ingestion.store_vectors"):
+                await self.store_vectors(chunks, embeddings, document_payload)
+            with tracer.start_as_current_span("ingestion.index_search"):
+                await self.index_for_search(parsed, document_payload)
 
-        # 4. Chunk with overlap
-        chunks = self.chunk_text(parsed.text, chunk_size=512, overlap=128)
-
-        # 5. Generate embeddings
-        embeddings = await self.generate_embeddings(chunks)
-
-        document_payload = {
-            "id": document_id,
-            "title": metadata.get("title", "Untitled"),
-            "source": source,
-            "uri": metadata.get("uri") or blob_uri,
-            "tags": metadata.get("tags", []),
-            "metadata": enriched_metadata,
-        }
-
-        # 6. Update knowledge graph
-        await self.update_graph(entities, document_payload)
-
-        # 7. Store in vector database
-        await self.store_vectors(chunks, embeddings, document_payload)
-
-        # 8. Index for search
-        await self.index_for_search(parsed, document_payload)
-
-        # 9. Persist metadata and audit trail
-        await self.persist_blob_metadata(document_payload, parsed)
-        await self.create_audit_record(source, document_payload)
+            await self.persist_blob_metadata(document_payload, parsed)
+            await self.create_audit_record(source, document_payload)
 
         return document_id
 
