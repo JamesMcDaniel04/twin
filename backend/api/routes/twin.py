@@ -3,10 +3,14 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import List
+from typing import Any, List
 
 from fastapi import APIRouter, HTTPException, status
-from motor.motor_asyncio import AsyncIOMotorCollection  # type: ignore
+
+try:  # Optional dependency for runtime environments without MongoDB client
+    from motor.motor_asyncio import AsyncIOMotorCollection  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    AsyncIOMotorCollection = Any  # type: ignore
 from pydantic import BaseModel, Field
 
 from backend.core.database import database_manager

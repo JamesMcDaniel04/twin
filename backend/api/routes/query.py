@@ -10,8 +10,10 @@ from typing import Any, Dict, List, Optional, Sequence
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, validator
 
-# Optional dependency for persistence typing
-from motor.motor_asyncio import AsyncIOMotorCollection  # type: ignore
+try:  # Optional dependency for persistence typing
+    from motor.motor_asyncio import AsyncIOMotorCollection  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    AsyncIOMotorCollection = Any  # type: ignore
 
 from backend.api.dependencies import get_current_user, get_db
 from backend.core.database import DatabaseManager
