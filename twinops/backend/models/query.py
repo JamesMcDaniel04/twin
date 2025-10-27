@@ -1,19 +1,3 @@
-"""Query data model definitions."""
-
-from __future__ import annotations
-
-from datetime import datetime
-from typing import Dict, List, Optional
-
-from pydantic import BaseModel, Field
-
-
-class Query(BaseModel):
-    id: str
-    text: str
-    embedding: Optional[List[float]] = None
-    context: Dict[str, str] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
 from __future__ import annotations
 
 from datetime import datetime

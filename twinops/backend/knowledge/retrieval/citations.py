@@ -1,32 +1,40 @@
-"""Citations builder for TwinOps responses."""
-
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Dict, Iterable, List, Optional
 
-from backend.models.document import Document
+
+@dataclass
+class Citation:
+    source_id: str
+    document_name: str
+    page_number: Optional[int]
+    confidence_score: float
+    timestamp: datetime
+    direct_link: str
 
 
 class CitationBuilder:
-    """Attach citation metadata to ranked results."""
+    """Legacy helper to map ranked results to citation dictionaries."""
 
-    def build(self, ranked_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        results = []
-        for item in ranked_results:
-            metadata = item.get("metadata", {})
-            document = Document(
-                id=item.get("document_id", metadata.get("document_id", "unknown")),
-                title=metadata.get("title", "Untitled"),
-                source=metadata.get("source", "unknown"),
-                uri=metadata.get("uri"),
-                metadata=metadata,
-            )
-            results.append(
+    def build(self, ranked_results: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        mapped: List[Dict[str, Any]] = []
+        for result in ranked_results:
+            metadata = result.get("metadata", {})
+            mapped.append(
                 {
-                    "document": document,
-                    "score": item.get("score", 0.0),
-                    "snippet": metadata.get("snippet", ""),
-                    "summary": metadata.get("summary", metadata.get("content", ""))[:500],
+                    "document": {
+                        "id": result.get("document_id"),
+                        "title": metadata.get("title"),
+                        "source": metadata.get("source"),
+                        "direct_link": metadata.get("direct_link"),
+                    },
+                    "score": result.get("score", 0.0),
+                    "snippet": metadata.get("summary") or metadata.get("snippet", ""),
                 }
             )
-        return results
+        return mapped
+
+
+__all__ = ["Citation", "CitationBuilder"]

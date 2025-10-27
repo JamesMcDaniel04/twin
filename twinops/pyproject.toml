@@ -83,7 +83,7 @@ dependencies = [
     "opentelemetry-api==1.22.0",
     "opentelemetry-sdk==1.22.0",
     "opentelemetry-instrumentation-fastapi==0.43b0",
-    "opentelemetry-exporter-jaeger==1.22.0",
+    "opentelemetry-exporter-jaeger==1.21.0",
     "sentry-sdk[fastapi]==1.39.2",
     "structlog==24.1.0",
     "python-json-logger==2.0.7",
