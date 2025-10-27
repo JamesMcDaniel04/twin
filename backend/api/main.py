@@ -16,6 +16,7 @@ from backend.core.config import settings
 from backend.core.database import database_manager
 from backend.core.exceptions import ApplicationError
 from backend.integrations.slack.bot import slack_bot
+from backend.orchestration.consumer import response_consumer
 from backend.orchestration.publisher import event_publisher
 
 
@@ -24,9 +25,18 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """Initialize shared resources on startup and tear them down on shutdown."""
 
     await database_manager.initialize()
-    yield
-    await database_manager.close()
-    await event_publisher.close()
+    await response_consumer.start()
+    if settings.SLACK_APP_TOKEN:
+        await slack_bot.start_socket_mode()
+
+    try:
+        yield
+    finally:
+        if settings.SLACK_APP_TOKEN:
+            await slack_bot.stop_socket_mode()
+        await response_consumer.stop()
+        await database_manager.close()
+        await event_publisher.close()
 
 
 app = FastAPI(

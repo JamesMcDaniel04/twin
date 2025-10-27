@@ -15,6 +15,7 @@ from backend.core.database import DatabaseManager
 from backend.core.exceptions import DelegationFailureError, KnowledgeNotFoundError
 from backend.core.security import SecurityManager
 from backend.knowledge.retrieval.citations import Citation
+from backend.knowledge.retrieval.feedback import FeedbackSignal, FeedbackManager
 from backend.knowledge.retrieval.graph_rag import (
     GraphContextProvider,
     GraphRAGEngine,
@@ -205,6 +206,7 @@ vector_service = VectorSearchService()
 graph_provider = InMemoryGraphProvider(KNOWLEDGE_BASE)
 text_retriever = InMemoryTextRetriever(KNOWLEDGE_BASE)
 ranker = HybridRanker()
+feedback_manager = FeedbackManager()
 
 # Seed fallback vector store
 for item in KNOWLEDGE_BASE:
@@ -227,6 +229,7 @@ graph_rag_engine: GraphRAGEngine = create_graph_rag_engine(
     text_retriever=text_retriever,
     ranker=ranker,
     weights={"graph": 0.4, "vector": 0.45, "text": 0.15},
+    feedback_manager=feedback_manager,
 )
 
 security_manager = SecurityManager(
@@ -428,6 +431,8 @@ class CitationModel(BaseModel):
 class QueryDocumentModel(BaseModel):
     document_id: str
     score: float
+    confidence: float
+    component_scores: Dict[str, float]
     metadata: Dict[str, Any]
     citations: List[CitationModel]
 
@@ -454,6 +459,18 @@ class ProcessQueryResponse(BaseModel):
     results: List[QueryDocumentModel]
     metrics: QueryMetricsModel
     source_count: int
+    weights: Dict[str, float]
+    experiments: Optional[List[Dict[str, Any]]] = None
+
+
+class FeedbackRequest(BaseModel):
+    query: str
+    document_id: str
+    helpful: bool
+    score: float = Field(..., ge=0.0, le=1.0)
+    channel: str = Field("ui", max_length=32)
+    component_scores: Optional[Dict[str, float]] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class TwinKnowledgeModel(BaseModel):
@@ -513,17 +530,33 @@ def _convert_summary(summary: RetrievalSummary) -> ProcessQueryResponse:
         QueryDocumentModel(
             document_id=doc.document_id,
             score=doc.score,
+            confidence=doc.confidence,
+            component_scores=doc.component_scores,
             metadata=doc.metadata,
             citations=[CitationModel.from_dataclass(citation) for citation in doc.citations],
         )
         for doc in summary.documents
     ]
     metrics = QueryMetricsModel(precision=summary.precision, recall=summary.recall)
+    experiments = None
+    if summary.experiments:
+        experiments = [
+            {
+                "weights": result.weights,
+                "score": result.score,
+                "coverage": result.coverage,
+                "diversity": result.diversity,
+                "top_documents": result.top_documents,
+            }
+            for result in summary.experiments
+        ]
     return ProcessQueryResponse(
         query_id=str(uuid.uuid4()),
         results=documents,
         metrics=metrics,
         source_count=len(summary.sources),
+        weights=summary.weights,
+        experiments=experiments,
     )
 
 
@@ -574,6 +607,34 @@ async def process_query(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.message) from exc
 
     return _convert_summary(summary)
+
+
+@router.post(
+    "/v1/query/feedback",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+@audit_log
+async def submit_feedback(
+    payload: FeedbackRequest,
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, str]:
+    metadata = dict(payload.metadata)
+    if payload.component_scores:
+        metadata.setdefault("component_scores", payload.component_scores)
+    metadata.setdefault("channel", payload.channel)
+
+    signal = FeedbackSignal(
+        query=payload.query,
+        document_id=payload.document_id,
+        user_id=current_user.id,
+        helpful=payload.helpful,
+        score=payload.score,
+        channel=payload.channel,
+        metadata=metadata,
+    )
+
+    await graph_rag_engine.record_feedback(signal)
+    return {"status": "accepted"}
 
 
 @router.get(

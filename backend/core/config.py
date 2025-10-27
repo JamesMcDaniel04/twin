@@ -54,6 +54,14 @@ class Settings(BaseSettings):
     TEMPORAL_HOST: str = "localhost:7233"
     KAFKA_BOOTSTRAP_SERVERS: str = "localhost:9092"
 
+    # Object storage
+    STORAGE_BACKEND: str = Field("local", pattern=r"^(local|s3|gcs)$")
+    S3_BUCKET_NAME: Optional[str] = None
+    S3_REGION: Optional[str] = None
+    S3_ENDPOINT_URL: Optional[AnyUrl] = None
+    GCS_BUCKET_NAME: Optional[str] = None
+    LOCAL_STORAGE_PATH: Path = Field(default_factory=lambda: Path("storage"))
+
     # Integrations
     SLACK_BOT_TOKEN: str = Field("xoxb-placeholder")
     SLACK_SIGNING_SECRET: str = Field("slack-signing-secret")
@@ -66,9 +74,11 @@ class Settings(BaseSettings):
     GITHUB_APP_ID: Optional[str] = None
     GITHUB_PRIVATE_KEY_PATH: Optional[Path] = None
     GITHUB_TOKEN: Optional[str] = None
+    GITHUB_REPOS: List[str] = Field(default_factory=list)
     CONFLUENCE_URL: Optional[AnyUrl] = None
     CONFLUENCE_EMAIL: Optional[str] = None
     CONFLUENCE_API_TOKEN: Optional[str] = None
+    GOOGLE_DRIVE_FILE_IDS: List[str] = Field(default_factory=list)
 
     # LLM provider configuration
     OPENAI_API_KEY: Optional[str] = None
@@ -116,6 +126,12 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
+
+    @field_validator("GITHUB_REPOS", "GOOGLE_DRIVE_FILE_IDS", mode="before")
+    def _split_list(cls, value: str | List[str]) -> List[str]:
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value or []
 
 
 @lru_cache()

@@ -2,312 +2,389 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
-from typing import Any, Dict
+import re
+import textwrap
+from typing import Any, Dict, List, Optional, Tuple
 
 from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
+from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
 
 from backend.core.config import settings
+from backend.core.exceptions import KnowledgeNotFoundError
+from backend.orchestration.router import router as orchestration_router
+from backend.orchestration.session import SessionState, session_store
 
 logger = logging.getLogger(__name__)
 
 
 class SlackBot:
-    """Encapsulates Slack Bolt app configuration and handlers."""
+    """Encapsulates Slack Bolt app configuration, session management, and handlers."""
 
     def __init__(self) -> None:
         self.app = AsyncApp(token=settings.SLACK_BOT_TOKEN, signing_secret=settings.SLACK_SIGNING_SECRET)
         self.handler = AsyncSlackRequestHandler(self.app)
+        self.socket_mode_handler: Optional[AsyncSocketModeHandler] = None
+        self._socket_task: Optional[asyncio.Task] = None
+
+        if settings.SLACK_APP_TOKEN:
+            self.socket_mode_handler = AsyncSocketModeHandler(self.app, settings.SLACK_APP_TOKEN)
+
         self.register_handlers()
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def start_socket_mode(self) -> None:
+        if not self.socket_mode_handler or self._socket_task:
+            return
+        logger.info("Starting Slack socket mode listener")
+        self._socket_task = asyncio.create_task(self.socket_mode_handler.start_async())
+
+    async def stop_socket_mode(self) -> None:
+        if self.socket_mode_handler:
+            await self.socket_mode_handler.close()
+        if self._socket_task:
+            self._socket_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._socket_task
+            self._socket_task = None
+
+    # ------------------------------------------------------------------
+    # Handler registration
+    # ------------------------------------------------------------------
 
     def register_handlers(self) -> None:
         """Register slash commands, events, and interactive components."""
 
-        # Slash commands
         self.app.command("/twin")(self.handle_twin_command)
         self.app.command("/delegate")(self.handle_delegate_command)
         self.app.command("/snapshot")(self.handle_snapshot_command)
 
-        # Events
         self.app.event("app_mention")(self.handle_mention)
         self.app.event("message")(self.handle_message)
 
-        # Shortcuts and actions
         self.app.shortcut("escalate_issue")(self.handle_escalation)
         self.app.action("approve_task")(self.handle_approval)
 
-    async def handle_twin_command(self, ack, body, respond, client, logger=logger):
-        """
-        Handle /twin command - Query digital twin knowledge.
+    # ------------------------------------------------------------------
+    # Slash commands
+    # ------------------------------------------------------------------
 
-        Usage: /twin <question>
-        Example: /twin Who handles AWS infrastructure issues?
-        """
+    async def handle_twin_command(self, ack, body, respond):
         await ack()
-
+        channel_id = body.get("channel_id")
         user_id = body.get("user_id")
-        query_text = body.get("text", "").strip()
+        text = (body.get("text") or "").strip()
 
-        logger.info(f"/twin command from {user_id}: {query_text}")
-
-        if not query_text:
-            await respond({
-                "response_type": "ephemeral",
-                "text": "Usage: `/twin <your question>`",
-                "blocks": [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": "*How to use /twin:*\n```/twin Who handles AWS infrastructure?```\n```/twin What's the process for deploying to production?```"
-                        }
-                    }
-                ]
-            })
+        if not text:
+            await respond(
+                {
+                    "response_type": "ephemeral",
+                    "text": "Usage: `/twin <your question>`\nTry `/twin Who owns the production deploy pipeline?`",
+                }
+            )
             return
 
-        # Show loading state
-        await respond({
-            "response_type": "ephemeral",
-            "text": f"🔍 Searching knowledge base for: _{query_text}_\nThis may take a few seconds..."
-        })
-
-        try:
-            # Import here to avoid circular dependencies
-            from backend.knowledge.retrieval.graph_rag import create_graph_rag_engine
-
-            # Query the Graph-RAG engine
-            engine = create_graph_rag_engine()
-            results = await engine.retrieve(query_text, top_k=5)
-
-            # Format response with citations
-            response_blocks = self._format_twin_response(query_text, results)
-
-            await respond({
-                "response_type": "in_channel",
-                "blocks": response_blocks
-            })
-
-        except Exception as e:
-            logger.error(f"Error processing /twin command: {e}", exc_info=True)
-            await respond({
+        await respond(
+            {
                 "response_type": "ephemeral",
-                "text": f"❌ Sorry, I encountered an error: {str(e)}"
-            })
+                "text": f"🔍 Searching TwinOps knowledge base for _{text}_ …",
+            }
+        )
 
-    async def handle_delegate_command(self, ack, body, respond, logger=logger):
-        """
-        Handle /delegate command - Route requests to available personnel.
+        session_id, _ = await self._ensure_session(channel_id, user_id)
+        await self._dispatch_query(
+            respond,
+            session_id,
+            user_id,
+            text,
+            response_mode="in_channel",
+        )
 
-        Usage: /delegate <task description>
-        Example: /delegate Create Jira ticket for database performance
-        """
+    async def handle_delegate_command(self, ack, body, respond):
         await ack()
-
         user_id = body.get("user_id")
-        task_text = body.get("text", "").strip()
-
-        logger.info(f"/delegate command from {user_id}: {task_text}")
+        task_text = (body.get("text") or "").strip()
 
         if not task_text:
-            await respond({
-                "response_type": "ephemeral",
-                "text": "Usage: `/delegate <task description>`"
-            })
+            await respond({"response_type": "ephemeral", "text": "Usage: `/delegate <task description>`"})
             return
 
-        await respond({
-            "response_type": "ephemeral",
-            "text": f"🧭 Finding the best person to handle: _{task_text}_"
-        })
-
-        try:
-            from backend.workflows.delegation import delegation_manager
-
-            # Find suitable delegate
-            # For now, returning a placeholder
-            await respond({
+        await respond(
+            {
                 "response_type": "in_channel",
                 "blocks": [
                     {
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"*Delegation Request*\n```{task_text}```\n\n*Status:* Routing to available personnel..."
-                        }
+                            "text": f"*Delegation Request*\n```{task_text}```\n\nRouting to available personnel …",
+                        },
                     },
                     {
                         "type": "context",
                         "elements": [
-                            {
-                                "type": "mrkdwn",
-                                "text": f"Requested by <@{user_id}>"
-                            }
-                        ]
-                    }
-                ]
-            })
-
-        except Exception as e:
-            logger.error(f"Error processing /delegate command: {e}", exc_info=True)
-            await respond({
-                "response_type": "ephemeral",
-                "text": f"❌ Delegation failed: {str(e)}"
-            })
+                            {"type": "mrkdwn", "text": f"Requested by <@{user_id}>"},  # type: ignore[dict-item]
+                        ],
+                    },
+                ],
+            }
+        )
 
     async def handle_snapshot_command(self, ack, respond):
-        """
-        Handle /snapshot command - Create point-in-time knowledge snapshot.
-
-        Usage: /snapshot [name]
-        Example: /snapshot Release-v2.3.4
-        """
         await ack()
-
-        await respond({
-            "response_type": "in_channel",
-            "blocks": [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": "📸 *Knowledge Snapshot Created*\n\nCaptured:\n• Current role assignments\n• Active workflows\n• Documentation state"
+        await respond(
+            {
+                "response_type": "in_channel",
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                "📸 *Knowledge Snapshot Triggered*\n"
+                                "Capturing current role assignments, active workflows, and documentation state."
+                            ),
+                        },
                     }
-                }
-            ]
-        })
+                ],
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # Events
+    # ------------------------------------------------------------------
 
     async def handle_mention(self, body, say):
-        """Handle @TwinOps mentions in channels."""
         event = body.get("event", {})
-        user = event.get("user")
-        text = event.get("text", "")
+        channel_id = event.get("channel")
+        user_id = event.get("user")
+        text = (event.get("text") or "")
+        query = re.sub(r"<@[A-Z0-9]+>", "", text).strip()
 
-        # Remove the mention from the text
-        import re
-        query = re.sub(r'<@[A-Z0-9]+>', '', text).strip()
+        if not query:
+            await say("Hi! Ask me a question about your operational knowledge base.")
+            return
 
-        if query:
-            await say(f"Hi <@{user}>! Let me search for: _{query}_")
-
-            try:
-                from backend.knowledge.retrieval.graph_rag import create_graph_rag_engine
-
-                engine = create_graph_rag_engine()
-                results = await engine.retrieve(query, top_k=3)
-
-                response_blocks = self._format_twin_response(query, results)
-                await say(blocks=response_blocks)
-
-            except Exception as e:
-                logger.error(f"Error in mention handler: {e}")
-                await say(f"Sorry <@{user}>, I encountered an error processing your request.")
-        else:
-            await say(f"Hi <@{user}>! I'm TwinOps, your operational continuity assistant. Try `/twin <question>` or just ask me anything!")
+        await say(f"🔎 Working on that, <@{user_id}> …")
+        session_id, _ = await self._ensure_session(channel_id, user_id)
+        await self._dispatch_query(say, session_id, user_id, query)
 
     async def handle_message(self, body, say):
-        """Handle direct messages to the bot."""
         event = body.get("event", {})
-
-        # Ignore bot messages
         if event.get("subtype") == "bot_message":
             return
-
-        # Only respond in DM channels
-        if event.get("channel_type") != "im":
+        channel_id = event.get("channel")
+        user_id = event.get("user")
+        text = (event.get("text") or "").strip()
+        if not text:
             return
+        session_id, _ = await self._ensure_session(channel_id, user_id)
+        await self._dispatch_query(say, session_id, user_id, text)
 
-        user = event.get("user")
-        text = event.get("text", "").strip()
-
-        if text:
-            await say(f"Thanks for your message! Processing: _{text}_")
-            # Process as query
-            try:
-                from backend.knowledge.retrieval.graph_rag import create_graph_rag_engine
-
-                engine = create_graph_rag_engine()
-                results = await engine.retrieve(text, top_k=3)
-
-                response_blocks = self._format_twin_response(text, results)
-                await say(blocks=response_blocks)
-
-            except Exception as e:
-                logger.error(f"Error in DM handler: {e}")
-                await say("Sorry, I encountered an error. Try using `/twin <question>` instead.")
+    # ------------------------------------------------------------------
+    # Interactive components
+    # ------------------------------------------------------------------
 
     async def handle_escalation(self, ack, body, respond):
-        """Handle escalation shortcut."""
         await ack()
+        await respond({"response_type": "ephemeral", "text": "🚨 Escalation workflow queued. Stay tuned!"})
 
-        await respond({
-            "response_type": "in_channel",
-            "blocks": [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": "🚨 *Escalation Initiated*\n\nCreating incident workflow..."
-                    }
-                }
-            ]
-        })
-
-    async def handle_approval(self, ack, body, client, respond):
-        """Handle approval button clicks."""
+    async def handle_approval(self, ack, body, respond):
         await ack()
-
         action = body.get("actions", [{}])[0]
         task_id = action.get("value", "unknown")
+        await respond(f"✅ Approval recorded for task `{task_id}`")
 
-        await respond({
-            "response_type": "ephemeral",
-            "text": f"✅ Task approved: {task_id}"
-        })
+    # ------------------------------------------------------------------
+    # Kafka integration
+    # ------------------------------------------------------------------
 
-    def _format_twin_response(self, query: str, results: Any) -> List[Dict[str, Any]]:
-        """Format Graph-RAG results as Slack blocks."""
-        blocks = [
+    async def dispatch_async_response(self, payload: Dict[str, Any]) -> None:
+        """Send asynchronous responses produced by background workers."""
+
+        session_id = payload.get("session_id")
+        response = payload.get("response")
+        citations = payload.get("citations", [])
+        documents = payload.get("documents", [])
+
+        channel_id, _ = self._decode_session_id(session_id)
+        if not channel_id or not response:
+            logger.warning("Unable to dispatch async response: payload=%s", payload)
+            return
+
+        ranking = payload.get("ranking") or {}
+        blocks = self._build_response_blocks(response, citations, documents, ranking.get("weights"))
+        try:
+            await self.app.client.chat_postMessage(channel=channel_id, text=response, blocks=blocks)
+        except Exception as exc:  # pragma: no cover - Slack API errors
+            logger.error("Failed to post async Slack message: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    async def _dispatch_query(
+        self,
+        responder,
+        session_id: str,
+        user_id: str,
+        text: str,
+        *,
+        response_mode: Optional[str] = None,
+    ) -> None:
+        try:
+            result = await orchestration_router.route(session_id=session_id, user_id=user_id, text=text)
+        except KnowledgeNotFoundError as exc:
+            await self._emit_message(
+                responder,
+                text=f"🙇 Sorry, I couldn't find anything relevant.\n```{exc.message}```",
+                response_mode="ephemeral" if response_mode else None,
+            )
+            return
+        except Exception as exc:
+            logger.exception("Slack query failed: %s", exc)
+            await self._emit_message(
+                responder,
+                text="⚠️ Something went wrong. Try again shortly.",
+                response_mode="ephemeral" if response_mode else None,
+            )
+            return
+
+        blocks = self._build_response_blocks(
+            result["response"],
+            result.get("citations", []),
+            result.get("documents", []),
+            result.get("weights"),
+        )
+        await self._emit_message(
+            responder,
+            text=result["response"],
+            blocks=blocks,
+            response_mode=response_mode,
+        )
+
+    async def _ensure_session(self, channel_id: str, user_id: str) -> Tuple[str, SessionState]:
+        session_id = f"slack:{channel_id}:{user_id}"
+        state = await session_store.load(session_id)
+        if state is None:
+            state = SessionState(session_id=session_id, user_id=user_id)
+            await session_store.save(state)
+        return session_id, state
+
+    def _build_response_blocks(
+        self,
+        answer: str,
+        citations: List[Dict[str, Any]],
+        documents: List[Dict[str, Any]],
+        weights: Optional[Dict[str, float]] = None,
+    ) -> List[Dict[str, Any]]:
+        blocks: List[Dict[str, Any]] = [
             {
                 "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*Query:* {query}"
-                }
-            },
-            {"type": "divider"}
+                "text": {"type": "mrkdwn", "text": answer},
+            }
         ]
 
-        # Add top results
-        for doc in results.documents[:3]:
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*{doc.metadata.get('title', 'Result')}*\nConfidence: {doc.score:.2%}\n{doc.metadata.get('summary', '')[:200]}"
-                }
-            })
-
-        # Add citations
-        if results.sources:
-            citations_text = "\n".join([
-                f"• {cite.document_name} (confidence: {cite.confidence_score:.2%})"
-                for cite in results.sources[:5]
-            ])
-
+        if citations:
             blocks.append({"type": "divider"})
-            blocks.append({
-                "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": f"*Sources:*\n{citations_text}"
-                    }
-                ]
-            })
+            for citation in citations[:5]:
+                title = citation.get("title") or citation.get("document_id")
+                link = citation.get("link")
+                score = citation.get("score")
+                details = f"*{title}*"
+                if link:
+                    details = f"<{link}|{title}>"
+                if score is not None:
+                    details += f" _(score: {score:.2f})_"
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": details}})
 
+        if documents:
+            weights = weights or {"graph": 0.35, "vector": 0.5, "text": 0.15}
+            top = documents[0]
+            preview = (top.get("metadata", {}) or {}).get("chunk") or ""
+            if preview:
+                preview = textwrap.shorten(preview.replace("\n", " "), width=190, placeholder="…")
+                blocks.append(
+                    {
+                        "type": "context",
+                        "elements": [{"type": "mrkdwn", "text": f"Snippet: {preview}"}],  # type: ignore[dict-item]
+                    }
+                )
+
+            breakdown_lines: List[str] = []
+            for idx, doc in enumerate(documents[:3], start=1):
+                metadata = doc.get("metadata", {}) or {}
+                title = metadata.get("title") or doc.get("document_id")
+                component_scores = doc.get("component_scores", {}) or {}
+                weighted_components = {
+                    name: component_scores.get(name, 0.0) * weights.get(name, 0.0)
+                    for name in weights
+                }
+                total = sum(weighted_components.values())
+                if total > 0:
+                    breakdown = ", ".join(
+                        f"{name} {value / total:.0%}"
+                        for name, value in weighted_components.items()
+                        if value > 0
+                    )
+                else:
+                    breakdown = ", ".join(
+                        f"{name} {component_scores.get(name, 0.0):.2f}"
+                        for name in weights
+                        if component_scores.get(name)
+                    ) or "n/a"
+                confidence = doc.get("confidence")
+                if confidence is None:
+                    confidence = doc.get("score", 0.0)
+                breakdown_lines.append(
+                    f"{idx}. *{title}* — confidence {confidence:.0%} ({breakdown})"
+                )
+
+            if breakdown_lines:
+                blocks.append({"type": "divider"})
+                blocks.append(
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "\n".join(breakdown_lines),
+                        },
+                    }
+                )
+
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "Generated by TwinOps"}]})  # type: ignore[dict-item]
         return blocks
+
+    async def _emit_message(
+        self,
+        responder,
+        *,
+        text: str,
+        blocks: Optional[List[Dict[str, Any]]] = None,
+        response_mode: Optional[str] = None,
+    ) -> None:
+        payload = {"text": text}
+        if blocks:
+            payload["blocks"] = blocks
+        if response_mode:
+            payload["response_type"] = response_mode
+
+        try:
+            await responder(**payload)
+        except TypeError:
+            await responder(payload)
+
+    def _decode_session_id(self, session_id: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+        if not session_id or not session_id.startswith("slack:"):
+            return None, None
+        _, channel_id, user_id = session_id.split(":", 2)
+        return channel_id, user_id
 
 
 slack_bot = SlackBot()

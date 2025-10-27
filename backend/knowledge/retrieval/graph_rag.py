@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence
 
-from backend.core.database import database_manager
 from backend.core.exceptions import KnowledgeNotFoundError
+from backend.knowledge.graph.manager import graph_manager
 from backend.knowledge.retrieval.citations import Citation
-from backend.knowledge.retrieval.ranker import HybridRanker
+from backend.knowledge.retrieval.feedback import FeedbackManager, FeedbackSignal
+from backend.knowledge.retrieval.ranker import HybridRanker, RankingExperimentResult
 from backend.knowledge.vector.embeddings import EmbeddingGenerator
 from backend.knowledge.vector.search import VectorSearchMatch, VectorSearchService
 
+logger = logging.getLogger(__name__)
 
 class GraphContextProvider(Protocol):
     async def expand(self, query: str) -> List[Dict[str, Any]]:
@@ -27,6 +30,8 @@ class TextRetriever(Protocol):
 class RetrievalDocument:
     document_id: str
     score: float
+    confidence: float
+    component_scores: Dict[str, float]
     metadata: Dict[str, Any]
     citations: List[Citation]
 
@@ -37,6 +42,8 @@ class RetrievalSummary:
     precision: float
     recall: float
     sources: List[Citation]
+    weights: Dict[str, float]
+    experiments: Optional[List[RankingExperimentResult]] = None
 
 
 class GraphRAGEngine:
@@ -51,20 +58,29 @@ class GraphRAGEngine:
         text_retriever: Optional[TextRetriever] = None,
         ranker: Optional[HybridRanker] = None,
         weights: Optional[Dict[str, float]] = None,
+        feedback_manager: Optional[FeedbackManager] = None,
     ) -> None:
         self.graph_provider = graph_provider
         self.vector_search = vector_search
         self.embedding_generator = embedding_generator
         self.text_retriever = text_retriever or _DefaultTextRetriever()
-        self.ranker = ranker or HybridRanker()
-        self.weights = weights or {"graph": 0.35, "vector": 0.5, "text": 0.15}
+        self.ranker = ranker or HybridRanker(default_weights=weights)
+        if weights and ranker:
+            self.ranker.update_default_weights(weights)
+        self.feedback_manager = feedback_manager or FeedbackManager()
+        self._experiment_interval = 25
+        self._query_count = 0
+        self._last_experiments: List[RankingExperimentResult] = []
 
     async def retrieve(self, query: str, *, top_k: int = 5) -> RetrievalSummary:
         graph_context = await self.graph_provider.expand(query)
         embedding = await self._embed_query(query)
         vector_results = await self.vector_search.search(embedding, top_k=top_k)
+        vector_payload = _prepare_vector_payload(vector_results)
         text_results = await self.text_retriever.search(query, graph_context)
-        ranked = self.ranker.rank(graph_context, _prepare_vector_payload(vector_results), text_results, self.weights)
+        ranked = self.ranker.rank(graph_context, vector_payload, text_results)
+
+        await self._maybe_run_weight_experiments(graph_context, vector_payload, text_results, top_k=top_k)
 
         if not ranked:
             raise KnowledgeNotFoundError(
@@ -82,6 +98,8 @@ class GraphRAGEngine:
             precision=precision,
             recall=recall,
             sources=citations,
+            weights=self.ranker.weights,
+            experiments=self._last_experiments or None,
         )
 
     async def vector_only(self, query: str, *, top_k: int = 5) -> RetrievalSummary:
@@ -91,7 +109,13 @@ class GraphRAGEngine:
         documents = self._build_documents(payload)
         precision, recall = self._calculate_metrics(documents, [])
         citations = [citation for doc in documents for citation in doc.citations]
-        return RetrievalSummary(documents=documents, precision=precision, recall=recall, sources=citations)
+        return RetrievalSummary(
+            documents=documents,
+            precision=precision,
+            recall=recall,
+            sources=citations,
+            weights=self.ranker.weights,
+        )
 
     async def _embed_query(self, query: str) -> List[float]:
         embeddings = await self.embedding_generator.generate([query])
@@ -99,14 +123,45 @@ class GraphRAGEngine:
             return []
         return embeddings[0]
 
+    async def record_feedback(self, signal: FeedbackSignal) -> None:
+        await self.feedback_manager.record(signal)
+        recommended = await self.feedback_manager.recommend_weights(self.ranker.weights)
+        self.ranker.update_default_weights(recommended)
+
+    async def _maybe_run_weight_experiments(
+        self,
+        graph_context: List[Dict[str, Any]],
+        vector_results: List[Dict[str, Any]],
+        text_results: List[Dict[str, Any]],
+        *,
+        top_k: int,
+    ) -> None:
+        self._query_count += 1
+        if self._query_count % self._experiment_interval != 0:
+            return
+        try:
+            self._last_experiments = self.ranker.run_experiments(
+                graph_context,
+                vector_results,
+                text_results,
+                top_k=top_k,
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("Failed to execute ranking weight experiments: %s", exc)
+
     def _build_documents(self, ranked_payload: List[Dict[str, Any]]) -> List[RetrievalDocument]:
         documents: List[RetrievalDocument] = []
         for item in ranked_payload:
             score = float(item.get("score", 0.0))
-            if score <= 0.05:
+            confidence = float(item.get("confidence", 0.0))
+            if score <= 0.05 and confidence <= 0.1:
                 continue
             metadata = item.get("metadata", {})
             document_id = item.get("document_id") or metadata.get("document_id") or f"doc-{len(documents)}"
+            component_scores = item.get("component_scores", {})
+            metadata = dict(metadata)
+            metadata.setdefault("confidence", confidence)
+            metadata.setdefault("confidence_breakdown", component_scores)
             citation = Citation(
                 source_id=document_id,
                 document_name=metadata.get("title", "Unknown"),
@@ -119,6 +174,8 @@ class GraphRAGEngine:
                 RetrievalDocument(
                     document_id=document_id,
                     score=score,
+                    confidence=confidence,
+                    component_scores=component_scores,
                     metadata=metadata,
                     citations=[citation],
                 )
@@ -181,38 +238,29 @@ class _DefaultTextRetriever(TextRetriever):
 
 class _Neo4jGraphProvider(GraphContextProvider):
     async def expand(self, query: str) -> List[Dict[str, Any]]:
-        driver = database_manager.neo4j
-        if driver is None:
+        try:
+            context = await graph_manager.expand_context(query)
+        except Exception as exc:  # pragma: no cover - Neo4j may be unavailable in tests
+            logger.warning("Graph context expansion failed: %s", exc)
             return []
 
-        cypher = """
-        MATCH (entity:Entity)-[:MENTIONS]->(doc:Document)
-        WHERE toLower(entity.name) CONTAINS toLower($query)
-           OR toLower(doc.title) CONTAINS toLower($query)
-        RETURN doc.id AS document_id,
-               doc.title AS title,
-               doc.source AS source,
-               collect(entity.name) AS entities
-        LIMIT 25
-        """
-        async with driver.session() as session:
-            result = await session.run(cypher, {"query": query})
-            records = await result.data()
-
-        context = []
-        for record in records:
-            context.append(
+        normalized_context: List[Dict[str, Any]] = []
+        for record in context:
+            metadata = record.get("metadata", {}) or {}
+            if "summary" not in metadata:
+                metadata["summary"] = ", ".join(record.get("nodes", []))
+            metadata.setdefault("title", record.get("title"))
+            metadata.setdefault("source", record.get("source"))
+            normalized_context.append(
                 {
-                    "document_id": record["document_id"],
-                    "nodes": record["entities"],
-                    "metadata": {
-                        "title": record["title"],
-                        "source": record["source"],
-                        "summary": ", ".join(record["entities"]),
-                    },
+                    "document_id": record.get("document_id"),
+                    "nodes": record.get("nodes", []),
+                    "seed_entities": record.get("seed_entities", []),
+                    "relationships": record.get("relationships", []),
+                    "metadata": metadata,
                 }
             )
-        return context
+        return normalized_context
 
 
 def create_graph_rag_engine(
@@ -223,6 +271,7 @@ def create_graph_rag_engine(
     text_retriever: Optional[TextRetriever] = None,
     ranker: Optional[HybridRanker] = None,
     weights: Optional[Dict[str, float]] = None,
+    feedback_manager: Optional[FeedbackManager] = None,
 ) -> GraphRAGEngine:
     provider = graph_provider or _Neo4jGraphProvider()
     vector = vector_search or VectorSearchService()
@@ -234,6 +283,7 @@ def create_graph_rag_engine(
         text_retriever=text_retriever,
         ranker=ranker,
         weights=weights,
+        feedback_manager=feedback_manager,
     )
 
 
