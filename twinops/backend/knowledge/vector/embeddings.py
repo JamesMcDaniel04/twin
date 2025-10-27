@@ -6,8 +6,7 @@ import asyncio
 import logging
 from typing import Iterable, List
 
-from openai import AsyncOpenAI
-from openai.error import OpenAIError
+from openai import APIError, AsyncOpenAI
 
 from backend.core.config import settings
 
@@ -36,7 +35,7 @@ class EmbeddingGenerator:
             try:
                 response = await self.client.embeddings.create(model=self.model, input=batch)
                 return [item.embedding for item in response.data]
-            except OpenAIError as exc:
+            except APIError as exc:
                 logger.warning("Embedding request failed (attempt %s/%s): %s", attempt, self.max_retries, exc)
                 if attempt == self.max_retries:
                     raise

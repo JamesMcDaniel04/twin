@@ -47,6 +47,8 @@ class HybridRanker:
     def _score_graph(self, graph_context: List[Dict[str, Any]]) -> Dict[str, float]:
         scores: Dict[str, float] = {}
         for ctx in graph_context:
-            for node in ctx.get("nodes", []):
-                scores[node] = scores.get(node, 0.0) + 1.0
+            doc_id = ctx.get("document_id")
+            weight = float(len(ctx.get("nodes", [])) or 1)
+            if doc_id:
+                scores[doc_id] = scores.get(doc_id, 0.0) + weight
         return scores
