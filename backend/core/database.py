@@ -32,7 +32,7 @@ class DatabaseManager:
 
         # Neo4j connection
         self.neo4j = AsyncGraphDatabase.driver(
-            settings.NEO4J_URI,
+            str(settings.NEO4J_URI),
             auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD),
         )
 
@@ -41,10 +41,10 @@ class DatabaseManager:
         self.index = self.pinecone.Index(settings.PINECONE_INDEX)
 
         # Redis connection
-        self.redis = await redis.from_url(settings.REDIS_URL, decode_responses=True)
+        self.redis = await redis.from_url(str(settings.REDIS_URL), decode_responses=True)
 
         # MongoDB for document storage
-        self.mongodb = AsyncIOMotorClient(settings.MONGODB_URL)
+        self.mongodb = AsyncIOMotorClient(str(settings.MONGODB_URL))
 
         logger.info("Database manager initialized")
 
