@@ -1,147 +1,243 @@
-"""Graph-RAG hybrid retrieval engine."""
-
 from __future__ import annotations
 
-import logging
-from typing import Any, Dict, List, Optional
+import asyncio
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence
 
-from elasticsearch import AsyncElasticsearch
-from neo4j import AsyncGraphDatabase
-from neo4j.exceptions import Neo4jError
-
-from backend.core.config import settings
 from backend.core.database import database_manager
-from backend.knowledge.ingestion.extractors import EntityExtractor
+from backend.core.exceptions import KnowledgeNotFoundError
+from backend.knowledge.retrieval.citations import Citation
 from backend.knowledge.retrieval.ranker import HybridRanker
-from backend.knowledge.retrieval.citations import CitationBuilder
-from backend.knowledge.vector.search import vector_search
-from backend.models.document import Document
-from backend.models.query import Query
+from backend.knowledge.vector.embeddings import EmbeddingGenerator
+from backend.knowledge.vector.search import VectorSearchMatch, VectorSearchService
 
-logger = logging.getLogger(__name__)
+
+class GraphContextProvider(Protocol):
+    async def expand(self, query: str) -> List[Dict[str, Any]]:
+        ...
+
+
+class TextRetriever(Protocol):
+    async def search(self, query: str, context: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        ...
+
+
+@dataclass
+class RetrievalDocument:
+    document_id: str
+    score: float
+    metadata: Dict[str, Any]
+    citations: List[Citation]
+
+
+@dataclass
+class RetrievalSummary:
+    documents: List[RetrievalDocument]
+    precision: float
+    recall: float
+    sources: List[Citation]
 
 
 class GraphRAGEngine:
-    """Implements hybrid retrieval combining graph traversal and semantic search."""
+    """Hybrid retrieval engine combining graph traversal with semantic search."""
 
-    def __init__(self) -> None:
-        self.entity_extractor = EntityExtractor()
-        self.rank_engine = HybridRanker()
-        self.citations = CitationBuilder()
-        self.es = AsyncElasticsearch(settings.ELASTICSEARCH_URL)
+    def __init__(
+        self,
+        *,
+        graph_provider: GraphContextProvider,
+        vector_search: VectorSearchService,
+        embedding_generator: EmbeddingGenerator,
+        text_retriever: Optional[TextRetriever] = None,
+        ranker: Optional[HybridRanker] = None,
+        weights: Optional[Dict[str, float]] = None,
+    ) -> None:
+        self.graph_provider = graph_provider
+        self.vector_search = vector_search
+        self.embedding_generator = embedding_generator
+        self.text_retriever = text_retriever or _DefaultTextRetriever()
+        self.ranker = ranker or HybridRanker()
+        self.weights = weights or {"graph": 0.35, "vector": 0.5, "text": 0.15}
 
-    async def retrieve(self, query: Query) -> List[Dict[str, Any]]:
-        # 1. Extract entities from query
-        entities = await self.extract_query_entities(query.text)
+    async def retrieve(self, query: str, *, top_k: int = 5) -> RetrievalSummary:
+        graph_context = await self.graph_provider.expand(query)
+        embedding = await self._embed_query(query)
+        vector_results = await self.vector_search.search(embedding, top_k=top_k)
+        text_results = await self.text_retriever.search(query, graph_context)
+        ranked = self.ranker.rank(graph_context, _prepare_vector_payload(vector_results), text_results, self.weights)
 
-        # 2. Graph traversal for context
-        graph_context = await self.traverse_graph(
-            entities=entities,
-            max_depth=3,
-            relationship_types=["OWNS_DOCUMENT", "MANAGES", "DELEGATES_TO"],
+        if not ranked:
+            raise KnowledgeNotFoundError(
+                error_code="KNOWLEDGE_NOT_FOUND",
+                message=f"No relevant knowledge found for query '{query}'",
+                details={"query": query},
+            )
+
+        documents = self._build_documents(ranked)
+        precision, recall = self._calculate_metrics(documents, graph_context)
+        citations = [citation for doc in documents for citation in doc.citations]
+
+        return RetrievalSummary(
+            documents=documents,
+            precision=precision,
+            recall=recall,
+            sources=citations,
         )
 
-        # 3. Build vector search filter from graph context
-        search_filter = self.build_search_filter(graph_context)
+    async def vector_only(self, query: str, *, top_k: int = 5) -> RetrievalSummary:
+        embedding = await self._embed_query(query)
+        vector_results = await self.vector_search.search(embedding, top_k=top_k)
+        payload = _prepare_vector_payload(vector_results)
+        documents = self._build_documents(payload)
+        precision, recall = self._calculate_metrics(documents, [])
+        citations = [citation for doc in documents for citation in doc.citations]
+        return RetrievalSummary(documents=documents, precision=precision, recall=recall, sources=citations)
 
-        # 4. Semantic vector search
-        vector_results = []
-        if query.embedding:
-            vector_results = await self.vector_search(query.embedding, filter=search_filter, top_k=20)
-
-        # 5. Full-text search for keyword matching
-        text_results = await self.text_search(query.text, filter=search_filter)
-
-        # 6. Hybrid ranking with learned weights
-        ranked_results = self.hybrid_rank(
-            graph_context=graph_context,
-            vector_results=vector_results,
-            text_results=text_results,
-            weights={"graph": 0.3, "vector": 0.5, "text": 0.2},
-        )
-
-        # 7. Add source citations
-        results_with_citations = self.add_citations(ranked_results)
-
-        return results_with_citations
-
-    async def extract_query_entities(self, text: str) -> List[Dict[str, str]]:
-        return await self.entity_extractor.extract(text)
-
-    async def traverse_graph(self, entities, max_depth, relationship_types):
-        driver = database_manager.neo4j
-        if not driver:
-            logger.warning("Neo4j driver not available; skipping graph traversal.")
+    async def _embed_query(self, query: str) -> List[float]:
+        embeddings = await self.embedding_generator.generate([query])
+        if not embeddings:
             return []
+        return embeddings[0]
 
-        entity_ids = [entity.get("id", entity.get("name")) for entity in entities if entity.get("name")]
-        if not entity_ids:
-            return []
-
-        rel_filter = "|".join(relationship_types)
-        query = """
-        MATCH (n)
-        WHERE n.id IN $entity_ids OR n.name IN $entity_ids
-        CALL apoc.path.expandConfig(n, {
-            relationshipFilter: $rel_types,
-            maxLevel: $max_depth,
-            uniqueness: 'NODE_GLOBAL'
-        })
-        YIELD path
-        RETURN path
-        """
-
-        try:
-            async with driver.session() as session:
-                result = await session.run(
-                    query,
-                    entity_ids=entity_ids,
-                    rel_types=rel_filter,
-                    max_depth=max_depth,
+    def _build_documents(self, ranked_payload: List[Dict[str, Any]]) -> List[RetrievalDocument]:
+        documents: List[RetrievalDocument] = []
+        for item in ranked_payload:
+            score = float(item.get("score", 0.0))
+            if score <= 0.05:
+                continue
+            metadata = item.get("metadata", {})
+            document_id = item.get("document_id") or metadata.get("document_id") or f"doc-{len(documents)}"
+            citation = Citation(
+                source_id=document_id,
+                document_name=metadata.get("title", "Unknown"),
+                page_number=metadata.get("page_number"),
+                confidence_score=score,
+                timestamp=datetime.utcnow(),
+                direct_link=metadata.get("direct_link", ""),
+            )
+            documents.append(
+                RetrievalDocument(
+                    document_id=document_id,
+                    score=score,
+                    metadata=metadata,
+                    citations=[citation],
                 )
-                paths = await result.values()
-                return [self._path_to_context(path[0]) for path in paths]
-        except Neo4jError as exc:  # pragma: no cover - network errors
-            logger.error("Graph traversal failed: %s", exc)
-            return []
+            )
+        return documents
 
-    def _path_to_context(self, path) -> Dict[str, Any]:
-        nodes = [node["id"] for node in path.nodes if "id" in node]
-        relationships = [rel.type for rel in path.relationships]
-        return {"nodes": nodes, "relationships": relationships}
+    def _calculate_metrics(
+        self,
+        documents: Sequence[RetrievalDocument],
+        graph_context: Sequence[Dict[str, Any]],
+    ) -> tuple[float, float]:
+        if not documents:
+            return 0.0, 0.0
 
-    def build_search_filter(self, graph_context: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        if not graph_context:
-            return None
-        related_nodes = {node for ctx in graph_context for node in ctx.get("nodes", [])}
-        if not related_nodes:
-            return None
-        return {"document_id": {"$in": list(related_nodes)}}
-
-    async def vector_search(self, query_embedding, filter, top_k):
-        return await vector_search.search(query_embedding, top_k=top_k, filter=filter)
-
-    async def text_search(self, query: str, filter: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-        body: Dict[str, Any] = {
-            "query": {
-                "bool": {
-                    "must": [{"match": {"content": query}}],
-                    "filter": [{"terms": {"document_id": filter["document_id"]["$in"]}}] if filter else [],
-                }
-            },
-            "size": 20,
+        relevant_documents = {
+            node_id
+            for context in graph_context
+            for node_id in context.get("nodes_relevant", context.get("nodes", []))
         }
+        if not relevant_documents:
+            precision = sum(1 for doc in documents if doc.score >= 0.5) / len(documents)
+            return float(precision), 0.0
 
-        try:
-            response = await self.es.search(index="twinops-documents", body=body)
-            hits = response["hits"]["hits"]
-            return [{"id": hit["_id"], "score": hit["_score"], "metadata": hit["_source"]} for hit in hits]
-        except Exception as exc:  # pragma: no cover - Elasticsearch not available
-            logger.error("Text search failed: %s", exc)
+        hits = sum(1 for doc in documents if doc.document_id in relevant_documents)
+        precision = hits / len(documents)
+        recall = hits / len(relevant_documents) if relevant_documents else 0.0
+        return float(precision), float(recall)
+
+
+def _prepare_vector_payload(matches: Iterable[VectorSearchMatch]) -> List[Dict[str, Any]]:
+    payload: List[Dict[str, Any]] = []
+    for match in matches:
+        payload.append(
+            {
+                "document_id": match.document_id,
+                "score": match.score,
+                "metadata": match.metadata,
+            }
+        )
+    return payload
+
+
+class _DefaultTextRetriever(TextRetriever):
+    async def search(self, query: str, context: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        await asyncio.sleep(0)
+        results: List[Dict[str, Any]] = []
+        normalized_query = query.lower()
+        for ctx in context:
+            metadata = ctx.get("metadata", {})
+            summary = metadata.get("summary", "")
+            if normalized_query in summary.lower():
+                results.append(
+                    {
+                        "document_id": ctx.get("document_id"),
+                        "score": 0.6,
+                        "metadata": metadata,
+                    }
+                )
+        return results
+
+
+class _Neo4jGraphProvider(GraphContextProvider):
+    async def expand(self, query: str) -> List[Dict[str, Any]]:
+        driver = database_manager.neo4j
+        if driver is None:
             return []
 
-    def hybrid_rank(self, graph_context, vector_results, text_results, weights):
-        return self.rank_engine.rank(graph_context, vector_results, text_results, weights)
+        cypher = """
+        MATCH (entity:Entity)-[:MENTIONS]->(doc:Document)
+        WHERE toLower(entity.name) CONTAINS toLower($query)
+           OR toLower(doc.title) CONTAINS toLower($query)
+        RETURN doc.id AS document_id,
+               doc.title AS title,
+               doc.source AS source,
+               collect(entity.name) AS entities
+        LIMIT 25
+        """
+        async with driver.session() as session:
+            result = await session.run(cypher, {"query": query})
+            records = await result.data()
 
-    def add_citations(self, ranked_results):
-        return self.citations.build(ranked_results)
+        context = []
+        for record in records:
+            context.append(
+                {
+                    "document_id": record["document_id"],
+                    "nodes": record["entities"],
+                    "metadata": {
+                        "title": record["title"],
+                        "source": record["source"],
+                        "summary": ", ".join(record["entities"]),
+                    },
+                }
+            )
+        return context
+
+
+def create_graph_rag_engine(
+    *,
+    graph_provider: Optional[GraphContextProvider] = None,
+    vector_search: Optional[VectorSearchService] = None,
+    embedding_generator: Optional[EmbeddingGenerator] = None,
+    text_retriever: Optional[TextRetriever] = None,
+    ranker: Optional[HybridRanker] = None,
+    weights: Optional[Dict[str, float]] = None,
+) -> GraphRAGEngine:
+    provider = graph_provider or _Neo4jGraphProvider()
+    vector = vector_search or VectorSearchService()
+    embeddings = embedding_generator or EmbeddingGenerator()
+    return GraphRAGEngine(
+        graph_provider=provider,
+        vector_search=vector,
+        embedding_generator=embeddings,
+        text_retriever=text_retriever,
+        ranker=ranker,
+        weights=weights,
+    )
+
+
+async def vector_search(query: str, *, top_k: int = 5, engine: Optional[GraphRAGEngine] = None) -> RetrievalSummary:
+    rag_engine = engine or create_graph_rag_engine()
+    return await rag_engine.vector_only(query, top_k=top_k)

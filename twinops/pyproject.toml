@@ -1,0 +1,250 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "twinops"
+version = "0.1.0"
+description = "Production-grade digital twin platform for operational continuity through Slack"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "TwinOps Team", email = "team@twinops.io"}
+]
+keywords = [
+    "digital-twin",
+    "knowledge-management",
+    "slack-bot",
+    "graph-rag",
+    "workflow-automation",
+    "institutional-knowledge"
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Office/Business",
+    "Framework :: FastAPI",
+]
+
+dependencies = [
+    "fastapi==0.110.0",
+    "uvicorn[standard]==0.27.1",
+    "pydantic==2.5.3",
+    "pydantic-settings==2.1.0",
+    "python-multipart==0.0.6",
+    "starlette==0.36.3",
+    "aiohttp==3.9.1",
+    "httpx==0.25.2",
+    "neo4j==5.16.0",
+    "pinecone-client==3.0.0",
+    "redis[hiredis]==5.0.1",
+    "motor==3.3.2",
+    "pymongo==4.6.1",
+    "elasticsearch==8.11.1",
+    "temporalio==1.3.0",
+    "aiokafka==0.10.0",
+    "kafka-python==2.0.2",
+    "openai==1.12.0",
+    "anthropic==0.21.3",
+    "tiktoken==0.5.2",
+    "langchain==0.1.4",
+    "langchain-openai==0.0.5",
+    "numpy==1.26.3",
+    "sentence-transformers==2.3.1",
+    "slack-bolt==1.19.0",
+    "slack-sdk==3.26.1",
+    "jira==3.6.0",
+    "google-auth==2.26.2",
+    "google-auth-oauthlib==1.2.0",
+    "google-auth-httplib2==0.2.0",
+    "google-api-python-client==2.115.0",
+    "PyGithub==2.1.1",
+    "pypdf==4.0.0",
+    "python-docx==1.1.0",
+    "python-pptx==0.6.23",
+    "openpyxl==3.1.2",
+    "python-magic==0.4.27",
+    "beautifulsoup4==4.12.3",
+    "lxml==5.1.0",
+    "markdown==3.5.2",
+    "pdfplumber==0.10.3",
+    "spacy==3.7.2",
+    "nltk==3.8.1",
+    "python-jose[cryptography]==3.3.0",
+    "passlib[bcrypt]==1.7.4",
+    "bcrypt==4.1.2",
+    "cryptography==42.0.0",
+    "prometheus-client==0.20.0",
+    "opentelemetry-api==1.22.0",
+    "opentelemetry-sdk==1.22.0",
+    "opentelemetry-instrumentation-fastapi==0.43b0",
+    "opentelemetry-exporter-jaeger==1.22.0",
+    "sentry-sdk[fastapi]==1.39.2",
+    "structlog==24.1.0",
+    "python-json-logger==2.0.7",
+    "python-dotenv==1.0.1",
+    "pyyaml==6.0.1",
+    "click==8.1.7",
+    "tenacity==8.2.3",
+    "validators==0.22.0",
+    "python-dateutil==2.8.2",
+    "pytz==2024.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==7.4.4",
+    "pytest-asyncio==0.23.3",
+    "pytest-cov==4.1.0",
+    "pytest-mock==3.12.0",
+    "faker==22.2.0",
+    "black==24.1.1",
+    "isort==5.13.2",
+    "flake8==7.0.0",
+    "mypy==1.8.0",
+    "pre-commit==3.6.0",
+    "types-redis==4.6.0.20240106",
+    "types-requests==2.31.0.20240125",
+    "types-pyyaml==6.0.12.12",
+]
+
+all = [
+    "twinops[dev]",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/twinops"
+Documentation = "https://docs.twinops.io"
+Repository = "https://github.com/yourusername/twinops"
+Issues = "https://github.com/yourusername/twinops/issues"
+
+[project.scripts]
+twinops = "backend.cli:main"
+
+# ============================================================================
+# Tool Configuration
+# ============================================================================
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["backend*"]
+exclude = ["tests*", "docs*"]
+
+[tool.black]
+line-length = 120
+target-version = ["py311"]
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 120
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
+skip_gitignore = true
+known_first_party = ["backend"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+strict_equality = true
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = [
+    "neo4j.*",
+    "pinecone.*",
+    "temporalio.*",
+    "slack_bolt.*",
+    "slack_sdk.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = [
+    "-ra",
+    "-q",
+    "--strict-markers",
+    "--strict-config",
+    "--cov=backend",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+    "--cov-report=xml",
+]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+markers = [
+    "unit: Unit tests",
+    "integration: Integration tests",
+    "e2e: End-to-end tests",
+    "slow: Slow running tests",
+]
+
+[tool.coverage.run]
+source = ["backend"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/__init__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+
+[tool.flake8]
+max-line-length = 120
+extend-ignore = ["E203", "E266", "E501", "W503"]
+exclude = [
+    ".git",
+    "__pycache__",
+    "build",
+    "dist",
+    ".eggs",
+    "*.egg",
+]
+max-complexity = 10
+
+[tool.bandit]
+exclude_dirs = ["tests", "*/test_*.py"]
+skips = ["B101", "B601"]

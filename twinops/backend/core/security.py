@@ -1,8 +1,32 @@
+"""Security utilities and access control orchestration for TwinOps."""
+
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, Optional, Protocol
 
-from ..utils.audit import audit_log
+from jose import JWTError, jwt
+
+from backend.core.config import settings
+from backend.core.exceptions import UnauthorizedError
+from backend.utils.audit import audit_log
+
+
+def create_access_token(subject: str, expires_delta: timedelta | None = None) -> str:
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
+    payload = {
+        "sub": subject,
+        "exp": expire,
+    }
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm="HS256")
+
+
+def verify_access_token(token: str) -> Dict[str, Any]:
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
+        return payload
+    except JWTError as exc:
+        raise UnauthorizedError("Invalid token") from exc
 
 
 class RBACService(Protocol):
@@ -42,7 +66,7 @@ class Resource(Protocol):
 
 
 class SecurityManager:
-    """Coordinates RBAC + ABAC + data classification enforcement."""
+    """Coordinates RBAC, ABAC, data classification, and audit logging."""
 
     def __init__(
         self,

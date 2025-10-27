@@ -16,6 +16,7 @@ from backend.core.config import settings
 from backend.core.database import database_manager
 from backend.core.exceptions import ApplicationError
 from backend.integrations.slack.bot import slack_bot
+from backend.orchestration.publisher import event_publisher
 
 
 @asynccontextmanager
@@ -25,6 +26,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await database_manager.initialize()
     yield
     await database_manager.close()
+    await event_publisher.close()
 
 
 app = FastAPI(

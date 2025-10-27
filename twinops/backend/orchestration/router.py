@@ -8,6 +8,7 @@ from typing import Dict
 from backend.knowledge.retrieval.graph_rag import GraphRAGEngine
 from backend.models.query import Query
 from backend.orchestration.context import context_manager
+from backend.orchestration.publisher import event_publisher
 
 
 class OrchestrationRouter:
@@ -29,6 +30,16 @@ class OrchestrationRouter:
 
         window.add_message("assistant", answer)
         await context_manager.save(window)
+
+        await event_publisher.publish(
+            topic="twinops.responses",
+            payload={
+                "session_id": session_id,
+                "user_id": user_id,
+                "response": answer,
+                "documents": [item["document"].id for item in results],
+            },
+        )
 
         return {"response": answer, "session_id": session_id}
 

@@ -10,6 +10,8 @@ from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
+from backend.utils.monitoring import observe_request
+
 logger = logging.getLogger("twinops.api")
 
 
@@ -20,6 +22,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         start_time = time.perf_counter()
         response = await call_next(request)
         duration_ms = (time.perf_counter() - start_time) * 1000
+        observe_request(request.method, request.url.path, response.status_code, duration_ms / 1000)
 
         logger.info(
             "request.completed",

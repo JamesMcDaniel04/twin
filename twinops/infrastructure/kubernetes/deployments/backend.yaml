@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: twinops-backend
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: twinops-backend
+  template:
+    metadata:
+      labels:
+        app: twinops-backend
+    spec:
+      containers:
+        - name: backend
+          image: ghcr.io/example/twinops-backend:latest
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: twinops-config
