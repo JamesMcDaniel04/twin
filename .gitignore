@@ -2,3 +2,12 @@
 
 #Ignore vscode AI rules
 .github/instructions/codacy.instructions.md
+
+# Local virtual environments
+.venv/
+
+# Test & coverage artifacts
+.coverage
+.pytest_cache/
+coverage.xml
+htmlcov/
