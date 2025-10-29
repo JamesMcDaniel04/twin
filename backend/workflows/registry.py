@@ -6,12 +6,18 @@ from typing import Iterable
 
 from backend.workflows import activities
 from backend.workflows.incident import IncidentWorkflow
+from backend.workflows.ingestion import (
+    IngestionWorkflow,
+    fetch_document_content,
+    ingest_document_to_knowledge_base,
+    update_ingestion_status,
+)
 from backend.workflows.onboarding import OnboardingWorkflow
 from backend.workflows.release import ReleaseWorkflow
 
 
 def workflows() -> Iterable[object]:
-    return [IncidentWorkflow, ReleaseWorkflow, OnboardingWorkflow]
+    return [IncidentWorkflow, ReleaseWorkflow, OnboardingWorkflow, IngestionWorkflow]
 
 
 def activities_list() -> Iterable[object]:
@@ -24,6 +30,10 @@ def activities_list() -> Iterable[object]:
         activities.assess_severity,
         activities.page_on_call_engineer,
         activities.schedule_postmortem,
+        # Ingestion activities
+        fetch_document_content,
+        ingest_document_to_knowledge_base,
+        update_ingestion_status,
     ]
 
 

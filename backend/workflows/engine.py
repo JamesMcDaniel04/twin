@@ -101,6 +101,7 @@ class WorkflowEngine:
             "incident": "workflows.incident.handle_incident",
             "release": "workflows.release.manage_release",
             "onboarding": "workflows.onboarding.employee_onboarding",
+            "ingestion": "workflows.ingestion.ingestion_workflow",
         }
 
         if workflow not in mapping:

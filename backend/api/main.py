@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from backend.api.routes import admin, query, twin, workflow
+from backend.api.routes import admin, ingestion, query, twin, validation, workflow
 from backend.api.middleware.logging import LoggingMiddleware
 from backend.api.middleware.ratelimit import RateLimitMiddleware
 from backend.core.config import settings
@@ -67,6 +67,8 @@ app.include_router(query.router, prefix="/api")
 app.include_router(twin.router, prefix="/api")
 app.include_router(workflow.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
+app.include_router(ingestion.router, prefix="/api")
+app.include_router(validation.router, prefix="/api")
 
 
 @app.post("/slack/events")

@@ -1,0 +1,84 @@
+{
+  "test_cases": [
+    {
+      "test_id": "container-vuln-001",
+      "query": "Which containers have critical vulnerabilities in the production registry?",
+      "expected_documents": [],
+      "relevance_scores": {},
+      "category": "container",
+      "description": "Test retrieval of containers with critical vulnerabilities from production registry"
+    },
+    {
+      "test_id": "container-sbom-001",
+      "query": "Show me the SBOM for the backend API container version 2.1.0",
+      "expected_documents": [],
+      "relevance_scores": {},
+      "category": "container",
+      "description": "Test SBOM document retrieval for specific container version"
+    },
+    {
+      "test_id": "container-registry-001",
+      "query": "List all containers from the gcr.io registry",
+      "expected_documents": [],
+      "relevance_scores": {},
+      "category": "container",
+      "description": "Test registry filtering for GCR containers"
+    },
+    {
+      "test_id": "container-deps-001",
+      "query": "What dependencies does the auth-service container have?",
+      "expected_documents": [],
+      "relevance_scores": {},
+      "category": "container",
+      "description": "Test dependency extraction from container SBOM"
+    },
+    {
+      "test_id": "container-update-001",
+      "query": "When was the frontend container last updated?",
+      "expected_documents": [],
+      "relevance_scores": {},
+      "category": "container",
+      "description": "Test temporal queries for container updates"
+    },
+    {
+      "test_id": "incident-001",
+      "query": "What was the root cause of the database outage last week?",
+      "expected_documents": [],
+      "relevance_scores": {},
+      "category": "incident",
+      "description": "Test incident root cause analysis retrieval"
+    },
+    {
+      "test_id": "runbook-001",
+      "query": "How do I restart the API service?",
+      "expected_documents": [],
+      "relevance_scores": {},
+      "category": "runbook",
+      "description": "Test operational runbook retrieval"
+    },
+    {
+      "test_id": "onboarding-001",
+      "query": "What are the steps for onboarding a new engineer?",
+      "expected_documents": [],
+      "relevance_scores": {},
+      "category": "onboarding",
+      "description": "Test onboarding documentation retrieval"
+    },
+    {
+      "test_id": "architecture-001",
+      "query": "Explain the microservices architecture of the platform",
+      "expected_documents": [],
+      "relevance_scores": {},
+      "category": "architecture",
+      "description": "Test architecture documentation retrieval"
+    },
+    {
+      "test_id": "security-001",
+      "query": "What are the authentication mechanisms used in the system?",
+      "expected_documents": [],
+      "relevance_scores": {},
+      "category": "security",
+      "description": "Test security documentation retrieval"
+    }
+  ]
+}
