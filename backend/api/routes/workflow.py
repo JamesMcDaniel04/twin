@@ -29,8 +29,8 @@ async def trigger_workflow(body: WorkflowRequest) -> WorkflowResponse:
     """Kick off a Temporal workflow run."""
 
     try:
-        run_id = await workflow_engine.start_workflow(body.workflow, body.payload)
+        start_result = await workflow_engine.start_workflow(body.workflow, body.payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return WorkflowResponse(run_id=run_id, workflow=body.workflow)
+    return WorkflowResponse(run_id=start_result.run_id, workflow=body.workflow)

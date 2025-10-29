@@ -136,7 +136,7 @@ class ValidationHarness:
 
         # Response format from router includes 'documents' and 'citations'
         for doc in response.get("documents", []):
-            doc_id = doc.get("id")
+            doc_id = doc.get("document_id") or doc.get("id")
             if doc_id:
                 retrieved_documents.append(doc_id)
                 scores[doc_id] = doc.get("score", 0.0)

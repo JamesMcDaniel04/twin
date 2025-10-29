@@ -238,10 +238,12 @@ async def ingest_document(request: IngestDocumentRequest) -> IngestionTaskRespon
 
     # Start Temporal workflow
     workflow_id = f"ingestion-{task_id}"
+    workflow_input = IngestionWorkflowInput(task_id=task_id, payload=payload)
+
     try:
-        await workflow_engine.start_workflow(
+        workflow_result = await workflow_engine.start_workflow(
             workflow="ingestion_workflow",
-            payload=IngestionWorkflowInput(task_id=task_id, payload=payload).__dict__,
+            payload=workflow_input,
             workflow_id=workflow_id,
         )
     except Exception as exc:
@@ -252,11 +254,26 @@ async def ingest_document(request: IngestDocumentRequest) -> IngestionTaskRespon
         )
         raise HTTPException(status_code=500, detail=f"Failed to start ingestion workflow: {exc}")
 
-    logger.info(f"Ingestion task {task_id} queued with workflow {workflow_id}")
+    await mongodb["twinops"]["ingestion_tasks"].update_one(
+        {"task_id": task_id},
+        {
+            "$set": {
+                "workflow_id": workflow_result.workflow_id,
+                "workflow_run_id": workflow_result.run_id,
+            }
+        },
+    )
+
+    logger.info(
+        "Ingestion task %s queued with workflow %s (run %s)",
+        task_id,
+        workflow_result.workflow_id,
+        workflow_result.run_id,
+    )
 
     return IngestionTaskResponse(
         task_id=task_id,
-        workflow_id=workflow_id,
+        workflow_id=workflow_result.workflow_id,
         status=IngestionStatus.QUEUED,
         submitted_at=submitted_at.isoformat(),
     )

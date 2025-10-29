@@ -176,14 +176,19 @@ async def ingest_document(payload: IngestDocumentPayload, background_tasks: Back
         from backend.workflows.engine import workflow_engine
 
         try:
-            workflow_id = await workflow_engine.start_workflow(
+            workflow_start = await workflow_engine.start_workflow(
                 "ingestion",
                 {
                     "task_id": task_id,
                     "payload": payload.dict(exclude_none=True),
                 },
             )
-            logger.info(f"Started Temporal workflow {workflow_id} for task {task_id}")
+            logger.info(
+                "Started Temporal workflow %s (run %s) for task %s",
+                workflow_start.workflow_id,
+                workflow_start.run_id,
+                task_id,
+            )
         except Exception as exc:
             logger.error(f"Failed to start Temporal workflow: {exc}")
             # Fall back to background task

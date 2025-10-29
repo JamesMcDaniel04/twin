@@ -6,7 +6,8 @@ import asyncio
 import contextlib
 import logging
 import uuid
-from typing import Any, Dict, Optional
+from dataclasses import dataclass
+from typing import Any, Optional
 
 from temporalio.client import Client  # type: ignore
 from temporalio.worker import Worker  # type: ignore
@@ -15,6 +16,15 @@ from backend.core.config import settings
 from backend.workflows import registry
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class WorkflowStartResult:
+    """Result information returned when starting a workflow."""
+
+    workflow: str
+    workflow_id: str
+    run_id: str
 
 
 class WorkflowEngine:
@@ -39,23 +49,41 @@ class WorkflowEngine:
                     raise
         return self._client
 
-    async def start_workflow(self, workflow: str, payload: Dict[str, Any]) -> str:
-        """Start a workflow run and return its run_id."""
+    async def start_workflow(
+        self,
+        workflow: str,
+        payload: Any,
+        *,
+        workflow_id: Optional[str] = None,
+        task_queue: Optional[str] = None,
+    ) -> WorkflowStartResult:
+        """Start a workflow run and return identifiers."""
 
         workflow_name = self._resolve_workflow(workflow)
+        chosen_queue = task_queue or settings.TEMPORAL_TASK_QUEUE
+        chosen_id = workflow_id or f"{workflow}-{uuid.uuid4()}"
+
         try:
             client = await self._ensure_client()
         except Exception:
             # Fallback when Temporal is not reachable (development/testing)
-            return f"{workflow}-{uuid.uuid4()}"
+            return WorkflowStartResult(
+                workflow=workflow_name,
+                workflow_id=chosen_id,
+                run_id=f"{chosen_id}-run",
+            )
 
         handle = await client.start_workflow(
             workflow_name,
             payload,
-            id=str(uuid.uuid4()),
-            task_queue=settings.TEMPORAL_TASK_QUEUE,
+            id=chosen_id,
+            task_queue=chosen_queue,
         )
-        return handle.first_execution_run_id
+        return WorkflowStartResult(
+            workflow=workflow_name,
+            workflow_id=chosen_id,
+            run_id=handle.first_execution_run_id,
+        )
 
     async def start_worker(self, *, task_queue: Optional[str] = None) -> None:
         """Launch a Temporal worker to service workflow and activity tasks."""
@@ -99,9 +127,13 @@ class WorkflowEngine:
     def _resolve_workflow(self, workflow: str) -> str:
         mapping = {
             "incident": "workflows.incident.handle_incident",
+            "workflows.incident.handle_incident": "workflows.incident.handle_incident",
             "release": "workflows.release.manage_release",
+            "workflows.release.manage_release": "workflows.release.manage_release",
             "onboarding": "workflows.onboarding.employee_onboarding",
-            "ingestion": "workflows.ingestion.ingestion_workflow",
+            "workflows.onboarding.employee_onboarding": "workflows.onboarding.employee_onboarding",
+            "ingestion": "ingestion_workflow",
+            "ingestion_workflow": "ingestion_workflow",
         }
 
         if workflow not in mapping:
